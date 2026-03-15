@@ -59,12 +59,22 @@ int zmk_analog_stick_split_report_peripheral_event(uint8_t reg, uint8_t type,
 
 #include <zmk/split/peripheral.h>
 
+/* Zephyr version compat: 3.5 = 2-arg INPUT_CALLBACK_DEFINE, 4.x = 3-arg */
+#if __has_include(<zephyr/input/input_callback.h>)
+#define SPLIT_INPUT_CB_DEFINE(dev, cb) INPUT_CALLBACK_DEFINE(dev, cb, NULL)
+#define SPLIT_INPUT_CB_SIG(name) \
+    static void name(struct input_event *evt, void *user_data)
+#else
+#define SPLIT_INPUT_CB_DEFINE(dev, cb) INPUT_CALLBACK_DEFINE(dev, cb)
+#define SPLIT_INPUT_CB_SIG(name) \
+    static void name(struct input_event *evt)
+#endif
+
 /* Legacy per-event peripheral handler */
 #define SPLIT_INST(n)                                                          \
     BUILD_ASSERT(DT_INST_NODE_HAS_PROP(n, device),                             \
                  "Peripheral input splits need a `device` property");          \
-    static void analog_stick_split_handler_##n(struct input_event *evt,        \
-                                                void *user_data) {            \
+    SPLIT_INPUT_CB_SIG(analog_stick_split_handler_##n) {                       \
         struct zmk_split_transport_peripheral_event ev = {                     \
             .type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT,     \
             .data = {.input_event = {                                          \
@@ -79,8 +89,8 @@ int zmk_analog_stick_split_report_peripheral_event(uint8_t reg, uint8_t type,
             LOG_ERR("Split forward failed: %d", ret);                          \
         }                                                                      \
     }                                                                          \
-    INPUT_CALLBACK_DEFINE(DEVICE_DT_GET(DT_INST_PHANDLE(n, device)),           \
-                          analog_stick_split_handler_##n, NULL);
+    SPLIT_INPUT_CB_DEFINE(DEVICE_DT_GET(DT_INST_PHANDLE(n, device)),           \
+                          analog_stick_split_handler_##n);
 
 #endif /* CONFIG_ZMK_SPLIT_ROLE_CENTRAL */
 

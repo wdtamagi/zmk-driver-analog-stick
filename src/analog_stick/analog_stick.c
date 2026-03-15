@@ -721,15 +721,14 @@ static int analog_stick_pm_action(const struct device *dev,
         },                                                                     \
                                                                                \
         .has_y = DT_INST_PROP_HAS_IDX(n, io_channels, 1),                     \
-        .y = COND_CODE_1(DT_INST_PROP_HAS_IDX(n, io_channels, 1),            \
-            ({                                                                 \
+        IF_ENABLED(DT_INST_PROP_HAS_IDX(n, io_channels, 1),                   \
+            (.y = {                                                            \
                 .adc = ADC_DT_SPEC_GET_BY_IDX(DT_DRV_INST(n), 1),            \
                 .min = DT_INST_PROP(n, y_min),                                 \
                 .center = DT_INST_PROP(n, y_center),                           \
                 .max = DT_INST_PROP(n, y_max),                                 \
                 .invert = DT_INST_PROP(n, invert_y),                           \
-            }),                                                                \
-            ({0})),                                                            \
+            },))                                                               \
                                                                                \
         .deadzone = DT_INST_PROP(n, deadzone),                                 \
         .deadzone_percent = DT_INST_PROP(n, deadzone_percent),                 \

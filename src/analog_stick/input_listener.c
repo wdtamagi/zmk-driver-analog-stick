@@ -29,6 +29,24 @@
 LOG_MODULE_REGISTER(zmk_analog_stick_listener, CONFIG_ZMK_ANALOG_STICK_LOG_LEVEL);
 
 /* -------------------------------------------------------------------------- */
+/* Zephyr version compatibility                                               */
+/* Zephyr 3.5: INPUT_CALLBACK_DEFINE(dev, cb)        — 2 args, no user_data  */
+/* Zephyr 4.1: INPUT_CALLBACK_DEFINE(dev, cb, udata) — 3 args, with user_data*/
+/* -------------------------------------------------------------------------- */
+
+#if __has_include(<zephyr/input/input_callback.h>)
+/* Zephyr 4.x+ — 3-arg form with user_data */
+#define ANALOG_STICK_INPUT_CB_DEFINE(dev, cb) INPUT_CALLBACK_DEFINE(dev, cb, NULL)
+#define ANALOG_STICK_INPUT_CB_SIG(name) \
+    static void name(struct input_event *evt, void *user_data)
+#else
+/* Zephyr 3.5 — 2-arg form, no user_data */
+#define ANALOG_STICK_INPUT_CB_DEFINE(dev, cb) INPUT_CALLBACK_DEFINE(dev, cb)
+#define ANALOG_STICK_INPUT_CB_SIG(name) \
+    static void name(struct input_event *evt)
+#endif
+
+/* -------------------------------------------------------------------------- */
 /* Per-layer configuration (from devicetree child nodes)                      */
 /* -------------------------------------------------------------------------- */
 
@@ -432,11 +450,10 @@ static void input_handler(const struct listener_config *config,
                                                                                \
     static struct listener_data listener_data_##n = {};                        \
                                                                                \
-    static void analog_stick_input_handler_##n(struct input_event *evt,        \
-                                               void *user_data) {             \
+    ANALOG_STICK_INPUT_CB_SIG(analog_stick_input_handler_##n) {                 \
         input_handler(&listener_config_##n, &listener_data_##n, evt);          \
     }                                                                          \
-    INPUT_CALLBACK_DEFINE(DEVICE_DT_GET(DT_INST_PHANDLE(n, device)),           \
-                          analog_stick_input_handler_##n, NULL);
+    ANALOG_STICK_INPUT_CB_DEFINE(DEVICE_DT_GET(DT_INST_PHANDLE(n, device)),    \
+                                 analog_stick_input_handler_##n);
 
 DT_INST_FOREACH_STATUS_OKAY(LISTENER_INST)
