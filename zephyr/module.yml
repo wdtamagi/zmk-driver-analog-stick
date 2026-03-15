@@ -1,0 +1,6 @@
+name: zmk-driver-analog-stick
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    dts_root: .

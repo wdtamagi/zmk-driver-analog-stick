@@ -1,0 +1,19 @@
+include: [base.yaml]
+
+compatible: "zmk,analog-stick-split"
+
+description: |
+  Wires an analog stick input device for split keyboard use.
+  On peripheral: subscribes to input events and forwards over BLE.
+  On central: receives forwarded events and re-emits on a proxy device
+  for the local input listener to process.
+
+properties:
+  reg:
+    required: true
+
+  device:
+    type: phandle
+    description: |
+      Reference to the zmk,analog-stick device (peripheral side only).
+      Not needed on the central side.

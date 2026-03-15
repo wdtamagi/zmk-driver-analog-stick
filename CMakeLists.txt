@@ -1,0 +1,2 @@
+add_subdirectory(src/analog_stick)
+zephyr_include_directories(include)

@@ -1,0 +1,5 @@
+target_sources_ifdef(CONFIG_ZMK_ANALOG_STICK app PRIVATE analog_stick.c)
+target_sources_ifdef(CONFIG_ZMK_ANALOG_STICK app PRIVATE input_listener.c)
+if(CONFIG_ZMK_SPLIT)
+  target_sources_ifdef(CONFIG_ZMK_ANALOG_STICK app PRIVATE input_split.c)
+endif()

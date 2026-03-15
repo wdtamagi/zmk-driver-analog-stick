@@ -1,0 +1,70 @@
+description: |
+  Mode-aware input listener for zmk,analog-stick devices. Routes stick
+  input events to switch, mouse, or scroll mode based on the active
+  ZMK keymap layer. Configured via child nodes per layer.
+
+compatible: "zmk,analog-stick-listener"
+
+properties:
+  device:
+    type: phandle
+    required: true
+    description: Reference to the zmk,analog-stick device to listen to.
+
+child-binding:
+  description: Per-layer mode configuration.
+
+  properties:
+    layers:
+      type: array
+      required: true
+      description: |
+        Array of layer indices this configuration applies to.
+        Example: layers = <0 1>;
+
+    mode:
+      type: int
+      required: true
+      description: |
+        Input mode for these layers. Use constants from
+        dt-bindings/analog-stick/modes.h:
+        ANALOG_STICK_MODE_SWITCH (0), ANALOG_STICK_MODE_MOUSE (1),
+        ANALOG_STICK_MODE_SCROLL (2).
+
+    up-keycode:
+      type: int
+      default: 0
+      description: HID keycode for up direction (switch mode).
+
+    down-keycode:
+      type: int
+      default: 0
+      description: HID keycode for down direction (switch mode).
+
+    left-keycode:
+      type: int
+      default: 0
+      description: HID keycode for left direction (switch mode).
+
+    right-keycode:
+      type: int
+      default: 0
+      description: HID keycode for right direction (switch mode).
+
+    mouse-min-speed:
+      type: int
+      default: 1
+      description: Minimum cursor speed in pixels per poll cycle (mouse mode).
+
+    mouse-max-speed:
+      type: int
+      default: 15
+      description: Maximum cursor speed in pixels per poll cycle (mouse mode).
+
+    scroll-divisor:
+      type: int
+      default: 4
+      description: |
+        Scroll rate divisor (scroll mode). Higher values produce slower
+        scrolling. The deflection magnitude is divided by this value
+        to determine scroll ticks per poll cycle.

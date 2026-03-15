@@ -1,0 +1,42 @@
+config ZMK_ANALOG_STICK
+	bool "ZMK Analog Stick Driver"
+	default y
+	depends on DT_HAS_ZMK_ANALOG_STICK_ENABLED
+	select ADC
+	select GPIO
+	select INPUT
+	help
+	  Multi-mode analog stick driver for ZMK. Reads hall-effect sensors
+	  via io-channels (MCP3208, nRF52840 SAADC, etc.) and emits Zephyr
+	  input events. Supports switch, mouse pointer, and scroll modes
+	  switchable per keymap layer.
+
+config ZMK_ANALOG_STICK_WORK_QUEUE_STACK_SIZE
+	int "Analog stick work queue stack size"
+	default 2048
+	range 1024 8192
+	depends on ZMK_ANALOG_STICK
+	help
+	  Stack size for the dedicated analog stick work queue thread.
+
+config ZMK_ANALOG_STICK_BLE_POLL_FLOOR
+	int "BLE poll floor (ms)"
+	default 8
+	range 1 100
+	depends on ZMK_ANALOG_STICK
+	help
+	  Minimum active poll interval when BLE is enabled. Polling faster
+	  than the BLE connection interval wastes power without improving
+	  responsiveness.
+
+config ZMK_ANALOG_STICK_INIT_PRIORITY
+	int "Analog stick init priority"
+	default 90
+	depends on ZMK_ANALOG_STICK
+	help
+	  Initialization priority for analog stick devices. Must be after
+	  ADC and GPIO device init (POST_KERNEL).
+
+module = ZMK_ANALOG_STICK
+module-str = zmk_analog_stick
+source "subsys/logging/Kconfig.template.log_config"

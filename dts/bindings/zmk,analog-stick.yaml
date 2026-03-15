@@ -1,0 +1,112 @@
+description: |
+  Multi-mode analog stick driver for ZMK. Reads hall-effect sensors via
+  Zephyr ADC io-channels and emits input events. Compatible with any
+  Zephyr ADC driver (MCP3208, nRF52840 SAADC, etc.).
+
+compatible: "zmk,analog-stick"
+
+properties:
+  io-channels:
+    type: phandle-array
+    required: true
+    description: |
+      ADC channel references. Index 0 = X axis (required).
+      Index 1 = Y axis (optional, omit for single-axis trigger/paddle).
+      Example: io-channels = <&mcp3208_0 0>, <&mcp3208_0 1>;
+
+  x-min:
+    type: int
+    required: true
+    description: Raw ADC value at minimum X deflection (calibration).
+
+  x-center:
+    type: int
+    required: true
+    description: Raw ADC value at X center/rest position (calibration).
+
+  x-max:
+    type: int
+    required: true
+    description: Raw ADC value at maximum X deflection (calibration).
+
+  y-min:
+    type: int
+    default: 0
+    description: Raw ADC value at minimum Y deflection (only used with dual-axis).
+
+  y-center:
+    type: int
+    default: 0
+    description: Raw ADC value at Y center/rest position (only used with dual-axis).
+
+  y-max:
+    type: int
+    default: 0
+    description: Raw ADC value at maximum Y deflection (only used with dual-axis).
+
+  deadzone:
+    type: int
+    default: 50
+    description: |
+      Deadzone radius in raw ADC units. For dual-axis, applies as a circular
+      deadzone (x^2 + y^2 < dz^2). For single-axis, linear threshold.
+
+  invert-x:
+    type: boolean
+    description: Invert X axis output (negate after rescaling).
+
+  invert-y:
+    type: boolean
+    description: Invert Y axis output (negate after rescaling).
+
+  wait-period-idle:
+    type: int
+    default: 100
+    description: Poll interval in ms when stick is at center (idle).
+
+  wait-period-active:
+    type: int
+    default: 1
+    description: Poll interval in ms when stick is deflected (active).
+
+  enable-gpios:
+    type: phandle-array
+    description: |
+      GPIO for sensor power control. When specified, the driver manages
+      this GPIO to power sensors on/off.
+
+  pulse-read:
+    type: boolean
+    description: |
+      Toggle sensor power per read cycle. Requires enable-gpios.
+      Reduces idle power by duty-cycling sensor power.
+
+  read-turn-on-time:
+    type: int
+    default: 5000
+    description: |
+      Sensor settling time in microseconds after asserting enable GPIO.
+      Hall sensors typically need 1-5ms to stabilize after power-on.
+
+  switch-activation-point:
+    type: int
+    default: 40
+    description: |
+      Threshold for switch mode activation in rescaled output units.
+      When the rescaled axis value exceeds this threshold, a key press
+      is generated. Range depends on output scaling (0-127 typical).
+
+  switch-hysteresis:
+    type: int
+    default: 0
+    description: |
+      Hysteresis band for switch mode in the same units as activation point.
+      Key release occurs when value drops below (activation - hysteresis).
+      Default 0 means 10% of activation point is used automatically.
+
+  filter-coefficients:
+    type: uint8-array
+    description: |
+      IIR biquad filter coefficients as 6 IEEE-754 floats packed as
+      24 bytes (b0 b1 b2 a0 a1 a2). a0 must be 1.0 (normalized).
+      Omit to disable filtering.
