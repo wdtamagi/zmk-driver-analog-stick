@@ -207,6 +207,10 @@ static void process_switch_mode(struct listener_data *data,
     /* Detect changes and invoke keymap behaviors */
     uint8_t pressed = new_dirs & ~data->pressed_dirs;
     uint8_t released = data->pressed_dirs & ~new_dirs;
+    /* source=0: the listener runs on the central side (input events arrive
+     * via input_split proxy on split keyboards). If the listener is ever
+     * run directly on a peripheral, source must be set to the peripheral's
+     * index instead. */
     int64_t ts = k_uptime_get();
 
     if (pressed & DIR_UP) {

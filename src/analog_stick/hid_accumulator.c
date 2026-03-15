@@ -53,7 +53,7 @@ void zmk_analog_stick_hid_flush(void) {
     zmk_hid_mouse_movement_update(
         (int16_t)CLAMP(acc_dx, INT16_MIN, INT16_MAX),
         (int16_t)CLAMP(acc_dy, INT16_MIN, INT16_MAX));
-    zmk_hid_mouse_scroll_set(
+    zmk_hid_mouse_scroll_update(
         (int8_t)CLAMP(acc_sx, INT8_MIN, INT8_MAX),
         (int8_t)CLAMP(acc_sy, INT8_MIN, INT8_MAX));
     zmk_endpoints_send_mouse_report();

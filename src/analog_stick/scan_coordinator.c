@@ -170,7 +170,7 @@ static void scan_coordinator_work_handler(struct k_work *work) {
         if (grp->has_gpio && grp->any_pulse_read &&
             !group_pulse_suppressed[g]) {
             gpio_pin_set_dt(grp->gpio, 1);
-            if (grp->settling_us <= 50) {
+            if (grp->settling_us <= 100) {
                 k_busy_wait(grp->settling_us);
             } else {
                 k_sleep(K_USEC(grp->settling_us));
@@ -330,6 +330,9 @@ static int scan_coordinator_init(void) {
 
     return 0;
 }
+
+BUILD_ASSERT(CONFIG_APPLICATION_INIT_PRIORITY >= CONFIG_ZMK_ANALOG_STICK_INIT_PRIORITY,
+             "Scan coordinator must init after analog stick devices");
 
 SYS_INIT(scan_coordinator_init, APPLICATION,
          CONFIG_APPLICATION_INIT_PRIORITY);

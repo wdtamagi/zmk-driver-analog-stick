@@ -13,9 +13,6 @@
 #include <stdbool.h>
 #include <limits.h>
 
-BUILD_ASSERT(((int64_t)(-1) >> 1) == (int64_t)(-1),
-             "q16_mul requires arithmetic right-shift for int64_t");
-
 typedef int32_t q16_t;
 
 #define Q16_SHIFT 16

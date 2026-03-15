@@ -56,7 +56,6 @@ properties:
 
   deadzone-percent:
     type: int
-    default: 5
     description: |
       Deadzone as a percentage of the smaller calibrated half-range
       (min(center - min, max - center)). Recommended for new designs.

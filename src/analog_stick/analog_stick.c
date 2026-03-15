@@ -33,6 +33,9 @@ BUILD_ASSERT(sizeof(float) == sizeof(uint32_t),
 BUILD_ASSERT(((-1) >> 1) == -1,
              "This driver requires arithmetic right-shift for signed integers");
 
+BUILD_ASSERT(((int64_t)(-1) >> 1) == (int64_t)(-1),
+             "q16_mul requires arithmetic right-shift for int64_t");
+
 /* -------------------------------------------------------------------------- */
 /* Q16.16 helpers local to the driver (not shared)                            */
 /* -------------------------------------------------------------------------- */
@@ -305,7 +308,7 @@ int analog_stick_read_adc(const struct device *dev) {
     data->raw_x = q16_from_int(adc_x);
 
     if (cfg->has_y) {
-        if (cfg->inter_channel_settling_us <= 50) {
+        if (cfg->inter_channel_settling_us <= 100) {
             k_busy_wait((uint32_t)cfg->inter_channel_settling_us);
         } else {
             k_sleep(K_USEC((uint32_t)cfg->inter_channel_settling_us));
@@ -568,7 +571,7 @@ static int analog_stick_init(const struct device *dev) {
             return err;
         }
         if (!cfg->pulse_read) {
-            if (cfg->read_turn_on_time <= 50) {
+            if (cfg->read_turn_on_time <= 100) {
                 k_busy_wait((uint32_t)cfg->read_turn_on_time);
             } else {
                 k_sleep(K_USEC(cfg->read_turn_on_time));
@@ -649,7 +652,7 @@ static int analog_stick_pm_action(const struct device *dev,
         }
         if (cfg->has_enable_gpio && !cfg->pulse_read) {
             gpio_pin_set_dt(&cfg->enable_gpio, 1);
-            if (cfg->read_turn_on_time <= 50) {
+            if (cfg->read_turn_on_time <= 100) {
                 k_busy_wait((uint32_t)cfg->read_turn_on_time);
             } else {
                 k_sleep(K_USEC(cfg->read_turn_on_time));
