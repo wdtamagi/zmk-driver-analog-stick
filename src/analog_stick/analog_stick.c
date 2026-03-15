@@ -42,10 +42,6 @@ static inline q16_t q16_abs(q16_t x) {
     return x < 0 ? -x : x;
 }
 
-static inline q16_t q16_neg(q16_t x) {
-    return (x == Q16_MIN) ? Q16_MAX : -x;
-}
-
 static inline q16_t q16_clamp(q16_t x, q16_t lo, q16_t hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
@@ -53,7 +49,7 @@ static inline q16_t q16_clamp(q16_t x, q16_t lo, q16_t hi) {
 static inline q16_t q16_from_float(float f) {
     if (f != f) return 0; /* NaN */
     float product = f * (float)Q16_ONE;
-    if (product > (float)Q16_MAX) return Q16_MAX;
+    if (product >= 2147483648.0f) return Q16_MAX;
     if (product < (float)Q16_MIN) return Q16_MIN;
     return (q16_t)product;
 }
@@ -147,6 +143,8 @@ struct analog_stick_config {
     struct axis_config y;
 
     int32_t deadzone;
+    int32_t deadzone_percent;
+    bool has_deadzone_percent;
     int32_t inter_channel_settling_us;
 
     bool has_filter;
@@ -170,6 +168,10 @@ struct analog_stick_data {
     struct biquad_state filter_y;
     struct biquad_coeffs coeffs;
 
+    /* Pre-computed normalization scale for filter (computed from ADC resolution) */
+    q16_t inv_full_scale;
+    q16_t full_scale_q16;
+
     /* Pre-computed reciprocals for hot path rescaling */
     q16_t inv_range_neg_x;
     q16_t inv_range_pos_x;
@@ -182,6 +184,8 @@ struct analog_stick_data {
 
     bool active;
     bool primed;
+
+    int32_t effective_deadzone; /* computed at init; used by rescale pipeline */
 };
 
 /* -------------------------------------------------------------------------- */
@@ -243,7 +247,7 @@ static q16_t rescale_axis(q16_t adc_val, const struct axis_config *ax,
         scaled = q16_mul(q16_sat_add(diff, dz), inv_neg);
     } else {
         if (inv_pos == 0) return 0;
-        scaled = q16_mul(diff - dz, inv_pos);
+        scaled = q16_mul(q16_sat_add(diff, q16_neg(dz)), inv_pos);
     }
 
     scaled = q16_clamp(scaled, -Q16_ONE, Q16_ONE);
@@ -259,7 +263,7 @@ static q16_t rescale_axis(q16_t adc_val, const struct axis_config *ax,
 /* Rail detection                                                             */
 /* -------------------------------------------------------------------------- */
 
-#define ADC_RAIL_MARGIN 5
+#define ADC_RAIL_MARGIN 15 /* noise margin: 15 LSB avoids false rail on noisy PCBs */
 
 static bool adc_at_rail(int32_t value, uint8_t resolution, uint8_t oversampling) {
     if (resolution == 0 || resolution > 16) {
@@ -301,7 +305,11 @@ int analog_stick_read_adc(const struct device *dev) {
     data->raw_x = q16_from_int(adc_x);
 
     if (cfg->has_y) {
-        k_busy_wait((uint32_t)cfg->inter_channel_settling_us);
+        if (cfg->inter_channel_settling_us <= 50) {
+            k_busy_wait((uint32_t)cfg->inter_channel_settling_us);
+        } else {
+            k_sleep(K_USEC((uint32_t)cfg->inter_channel_settling_us));
+        }
         err = adc_read(cfg->y.adc.dev, &data->seq_y);
         if (err) {
             LOG_ERR("Y-axis ADC read failed: %d", err);
@@ -335,29 +343,28 @@ void analog_stick_process_and_emit(const struct device *dev) {
     q16_t raw_y = data->raw_y;
 
     /* --- IIR filter --- */
-    if (cfg->has_filter && data->active) {
+    if (cfg->has_filter) {
+        q16_t norm_x = q16_mul(raw_x, data->inv_full_scale);
+        q16_t norm_y = cfg->has_y ? q16_mul(raw_y, data->inv_full_scale) : 0;
         if (!data->primed) {
-            biquad_prime(&data->filter_x, &data->coeffs, raw_x);
+            biquad_prime(&data->filter_x, &data->coeffs, norm_x);
             if (cfg->has_y) {
-                biquad_prime(&data->filter_y, &data->coeffs, raw_y);
+                biquad_prime(&data->filter_y, &data->coeffs, norm_y);
             }
             data->primed = true;
-            goto skip_filter;
         }
-        raw_x = biquad_process(&data->filter_x, &data->coeffs, raw_x);
+        q16_t filtered_norm_x = biquad_process(&data->filter_x, &data->coeffs, norm_x);
+        raw_x = q16_mul(filtered_norm_x, data->full_scale_q16);
         if (cfg->has_y) {
-            raw_y = biquad_process(&data->filter_y, &data->coeffs, raw_y);
+            q16_t filtered_norm_y = biquad_process(&data->filter_y, &data->coeffs, norm_y);
+            raw_y = q16_mul(filtered_norm_y, data->full_scale_q16);
         }
-    } else if (cfg->has_filter && !data->active) {
-        data->primed = false;
     }
-
-skip_filter:;
     /* --- Rescale --- */
-    q16_t scaled_x = rescale_axis(raw_x, &cfg->x, cfg->deadzone,
+    q16_t scaled_x = rescale_axis(raw_x, &cfg->x, data->effective_deadzone,
                                   data->inv_range_neg_x, data->inv_range_pos_x);
     q16_t scaled_y = cfg->has_y
-        ? rescale_axis(raw_y, &cfg->y, cfg->deadzone,
+        ? rescale_axis(raw_y, &cfg->y, data->effective_deadzone,
                        data->inv_range_neg_y, data->inv_range_pos_y)
         : 0;
 
@@ -470,8 +477,8 @@ static int parse_filter_coeffs(struct analog_stick_data *data,
 static void compute_axis_reciprocals(const struct axis_config *ax, int32_t deadzone,
                                      q16_t *inv_neg, q16_t *inv_pos) {
     q16_t dz = q16_from_int(deadzone);
-    q16_t range_neg = q16_from_int(ax->center - ax->min) - dz;
-    q16_t range_pos = q16_from_int(ax->max - ax->center) - dz;
+    q16_t range_neg = q16_sat_add(q16_from_int(ax->center - ax->min), q16_neg(dz));
+    q16_t range_pos = q16_sat_add(q16_from_int(ax->max - ax->center), q16_neg(dz));
     *inv_neg = (range_neg > 0) ? q16_div(Q16_ONE, range_neg) : 0;
     *inv_pos = (range_pos > 0) ? q16_div(Q16_ONE, range_pos) : 0;
 }
@@ -500,19 +507,39 @@ static int analog_stick_init(const struct device *dev) {
                 cfg->y.min, cfg->y.center, cfg->y.max);
         return -EINVAL;
     }
-    if (cfg->deadzone < 0) {
-        LOG_ERR("deadzone must be non-negative");
+    /* Determine effective deadzone (precedence: deadzone-percent > deadzone) */
+    if (cfg->has_deadzone_percent) {
+        if (cfg->deadzone_percent < 1 || cfg->deadzone_percent > 99) {
+            LOG_ERR("deadzone-percent %d out of range [1, 99]",
+                    cfg->deadzone_percent);
+            return -EINVAL;
+        }
+        /* Warn if both properties were explicitly set in DT */
+        if (cfg->deadzone != 50) {
+            LOG_WRN("Both deadzone and deadzone-percent specified; "
+                    "deadzone-percent takes precedence");
+        }
+        int32_t half_range = MIN(cfg->x.center - cfg->x.min,
+                                 cfg->x.max - cfg->x.center);
+        data->effective_deadzone = (half_range * cfg->deadzone_percent) / 100;
+    } else {
+        data->effective_deadzone = cfg->deadzone;
+    }
+
+    /* Validate effective deadzone */
+    if (data->effective_deadzone < 0) {
+        LOG_ERR("effective deadzone must be non-negative");
         return -EINVAL;
     }
-    if (cfg->deadzone >= (cfg->x.center - cfg->x.min) ||
-        cfg->deadzone >= (cfg->x.max - cfg->x.center)) {
-        LOG_ERR("deadzone exceeds X axis range");
+    if (data->effective_deadzone >= (cfg->x.center - cfg->x.min) ||
+        data->effective_deadzone >= (cfg->x.max - cfg->x.center)) {
+        LOG_ERR("effective deadzone exceeds X axis range");
         return -EINVAL;
     }
     if (cfg->has_y &&
-        (cfg->deadzone >= (cfg->y.center - cfg->y.min) ||
-         cfg->deadzone >= (cfg->y.max - cfg->y.center))) {
-        LOG_ERR("deadzone exceeds Y axis range");
+        (data->effective_deadzone >= (cfg->y.center - cfg->y.min) ||
+         data->effective_deadzone >= (cfg->y.max - cfg->y.center))) {
+        LOG_ERR("effective deadzone exceeds Y axis range");
         return -EINVAL;
     }
     if (cfg->read_turn_on_time < 0 || cfg->read_turn_on_time > MAX_TURN_ON_TIME_US) {
@@ -541,7 +568,7 @@ static int analog_stick_init(const struct device *dev) {
             return err;
         }
         if (!cfg->pulse_read) {
-            if (cfg->read_turn_on_time <= 1000) {
+            if (cfg->read_turn_on_time <= 50) {
                 k_busy_wait((uint32_t)cfg->read_turn_on_time);
             } else {
                 k_sleep(K_USEC(cfg->read_turn_on_time));
@@ -569,11 +596,23 @@ static int analog_stick_init(const struct device *dev) {
         return err;
     }
 
+    /* Pre-compute normalization scale for filter */
+    if (cfg->has_filter) {
+        uint8_t res = cfg->x.adc.resolution;
+        if (res < 1 || res > 16) {
+            LOG_ERR("ADC resolution %d out of range [1, 16]", res);
+            return -EINVAL;
+        }
+        int32_t full_scale = (int32_t)((1U << res) - 1U);
+        data->full_scale_q16 = q16_from_int(full_scale);
+        data->inv_full_scale = q16_div(Q16_ONE, data->full_scale_q16);
+    }
+
     /* Pre-compute reciprocals */
-    compute_axis_reciprocals(&cfg->x, cfg->deadzone,
+    compute_axis_reciprocals(&cfg->x, data->effective_deadzone,
                              &data->inv_range_neg_x, &data->inv_range_pos_x);
     if (cfg->has_y) {
-        compute_axis_reciprocals(&cfg->y, cfg->deadzone,
+        compute_axis_reciprocals(&cfg->y, data->effective_deadzone,
                                  &data->inv_range_neg_y, &data->inv_range_pos_y);
     }
 
@@ -610,7 +649,7 @@ static int analog_stick_pm_action(const struct device *dev,
         }
         if (cfg->has_enable_gpio && !cfg->pulse_read) {
             gpio_pin_set_dt(&cfg->enable_gpio, 1);
-            if (cfg->read_turn_on_time <= 1000) {
+            if (cfg->read_turn_on_time <= 50) {
                 k_busy_wait((uint32_t)cfg->read_turn_on_time);
             } else {
                 k_sleep(K_USEC(cfg->read_turn_on_time));
@@ -693,6 +732,8 @@ static int analog_stick_pm_action(const struct device *dev,
             ({0})),                                                            \
                                                                                \
         .deadzone = DT_INST_PROP(n, deadzone),                                 \
+        .deadzone_percent = DT_INST_PROP(n, deadzone_percent),                 \
+        .has_deadzone_percent = HAS_PROP(n, deadzone_percent),                 \
         .inter_channel_settling_us = DT_INST_PROP(n, inter_channel_settling_time), \
                                                                                \
         .has_filter = HAS_PROP(n, filter_coefficients),                        \

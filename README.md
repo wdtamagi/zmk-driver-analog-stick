@@ -195,6 +195,31 @@ analog_stick0: analog_stick0 {
 
 When the active poll rate makes pulse-read counterproductive (settling time > half the poll period), the driver automatically keeps sensors powered and logs a message. Pulse-read re-engages when the stick returns to idle.
 
+### Ratiometric Deadzone
+
+TMR sensors have a temperature coefficient of roughly −0.1 to −0.3 %/°C on bridge output. Over a 40 °C swing a 12-bit sensor centered at 2048 can drift ~164 LSB, overwhelming a fixed 50-count deadzone and producing phantom stick activity at elevated temperature.
+
+The `deadzone-percent` property expresses the deadzone as a percentage of the sensor's smaller calibrated half-range, so the effective deadzone in raw units scales with the actual output swing:
+
+```
+half_range   = min(x_center - x_min, x_max - x_center)
+effective_dz = (half_range × deadzone-percent) / 100
+```
+
+The computation runs once at init and is stored in `effective_deadzone`. With a typical 12-bit stick (half-range ~1848) and the default 5%, the effective deadzone is ~92 counts — comparable to the legacy default of 50, but temperature-stable.
+
+Use `deadzone-percent` for new designs:
+
+```dts
+analog_stick0: analog_stick0 {
+    compatible = "zmk,analog-stick";
+    /* ... calibration ... */
+    deadzone-percent = <5>;  /* 5% of half-range (default; omit to use this value) */
+};
+```
+
+If both `deadzone` and `deadzone-percent` are present in the overlay, `deadzone-percent` takes precedence and a warning is logged at init.
+
 ### Filtering
 
 Apply a 2nd-order Butterworth low-pass IIR filter to reduce sensor noise:
@@ -275,7 +300,8 @@ Typical 12-bit MCP3208 values: min ~200, center ~2048, max ~3900.
 | `y-min` | int | no | 0 | Raw ADC at min Y deflection |
 | `y-center` | int | no | 0 | Raw ADC at Y rest position |
 | `y-max` | int | no | 0 | Raw ADC at max Y deflection |
-| `deadzone` | int | no | 50 | Per-axis linear deadzone in raw ADC units |
+| `deadzone` | int | no | 50 | Per-axis linear deadzone in raw ADC units (deprecated; prefer `deadzone-percent`) |
+| `deadzone-percent` | int | no | 5 | Deadzone as % of smaller calibrated half-range; takes precedence over `deadzone` |
 | `invert-x` | boolean | no | false | Negate X axis |
 | `invert-y` | boolean | no | false | Negate Y axis |
 | `wait-period-idle` | int | no | 100 | Idle poll interval (ms) |
@@ -307,6 +333,14 @@ Typical 12-bit MCP3208 values: min ~200, center ~2048, max ~3900.
 | `mouse-min-speed` | int | no | 1 | Min cursor speed (mouse mode) |
 | `mouse-max-speed` | int | no | 15 | Max cursor speed (mouse mode) |
 | `scroll-divisor` | int | no | 4 | Scroll rate divisor (scroll mode) |
+
+## Known Limitations
+
+**BLE bandwidth with 5+ sticks**: The per-event split transport sends one BLE notification per
+input axis event. Configurations with 5 or more sticks will approach the BLE throughput ceiling
+at short connection intervals, resulting in increased input latency. A custom GATT transport
+(`packed-ble-gatt-transport`) is planned to address this by coalescing all axis changes into one
+notification per scan cycle.
 
 ## Migration Notes
 

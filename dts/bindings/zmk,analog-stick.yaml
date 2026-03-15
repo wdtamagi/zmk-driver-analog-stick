@@ -49,9 +49,19 @@ properties:
     type: int
     default: 50
     description: |
-      Per-axis linear deadzone in raw ADC units. Values within this
-      distance of center are treated as zero. Applied independently
-      to each axis in rescale_axis().
+      Per-axis linear deadzone in raw ADC units (legacy). Values within
+      this distance of center are treated as zero. Applied independently
+      to each axis in rescale_axis(). Deprecated: prefer deadzone-percent
+      for new designs.
+
+  deadzone-percent:
+    type: int
+    default: 5
+    description: |
+      Deadzone as a percentage of the smaller calibrated half-range
+      (min(center - min, max - center)). Recommended for new designs.
+      When specified, takes precedence over deadzone. A LOG_WRN is
+      emitted if both properties are present in the overlay.
 
   invert-x:
     type: boolean
@@ -86,12 +96,12 @@ properties:
 
   read-turn-on-time:
     type: int
-    default: 100
+    default: 300
     description: |
       Sensor settling time in microseconds after asserting enable GPIO.
-      Default 100µs is appropriate for TMR sensors. Hall-effect users
-      should set 1000-5000µs per their sensor datasheet (e.g.
-      read-turn-on-time = <5000>).
+      Default 300µs covers TAS2141 behind P-MOSFET. Directly driven TMR
+      sensors may use 100µs; hall-effect sensors typically need 1000–5000µs
+      per their sensor datasheet (e.g. read-turn-on-time = <5000>).
 
   inter-channel-settling-time:
     type: int

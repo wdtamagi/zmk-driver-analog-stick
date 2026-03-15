@@ -259,11 +259,11 @@ static void process_mouse_mode(struct listener_data *data,
      * Good enough for speed mapping, avoids sqrt entirely. */
     int32_t ax = (x < 0) ? -x : x;
     int32_t ay = (y < 0) ? -y : y;
-    int32_t mag = (ax > ay) ? (ax + ((ay * 3) >> 3))
-                            : (ay + ((ax * 3) >> 3));
+    int32_t raw_mag = (ax > ay) ? (ax + ((ay * 3) >> 3))
+                                : (ay + ((ax * 3) >> 3));
 
-    /* mag is in [0, ~170] for inputs in [-127, 127] range */
-    if (mag > 127) mag = 127;
+    /* mag capped to 127 for speed ramp; raw_mag used for direction */
+    int32_t mag = (raw_mag > 127) ? 127 : raw_mag;
 
     /* Linear speed ramp: min_speed at mag=1, max_speed at mag=127 */
     int32_t min_spd = lcfg->mouse_min_speed;
@@ -280,8 +280,8 @@ static void process_mouse_mode(struct listener_data *data,
     }
 
     /* Decompose into X/Y components preserving angle */
-    q16_t dx = q16_mul(speed, (q16_t)((int32_t)x << Q16_SHIFT) / (mag > 0 ? mag : 1));
-    q16_t dy = q16_mul(speed, (q16_t)((int32_t)y << Q16_SHIFT) / (mag > 0 ? mag : 1));
+    q16_t dx = q16_mul(speed, (q16_t)((uint32_t)(int32_t)x << Q16_SHIFT) / (raw_mag > 0 ? raw_mag : 1));
+    q16_t dy = q16_mul(speed, (q16_t)((uint32_t)(int32_t)y << Q16_SHIFT) / (raw_mag > 0 ? raw_mag : 1));
 
     /* Accumulate sub-pixel fractions (saturating to prevent overflow) */
     data->mouse_acc_x = q16_sat_add(data->mouse_acc_x, dx);
@@ -292,8 +292,8 @@ static void process_mouse_mode(struct listener_data *data,
     int16_t py = (int16_t)(data->mouse_acc_y >> Q16_SHIFT);
 
     /* Keep fractional remainder */
-    data->mouse_acc_x -= (q16_t)px << Q16_SHIFT;
-    data->mouse_acc_y -= (q16_t)py << Q16_SHIFT;
+    data->mouse_acc_x -= (q16_t)((uint32_t)(int32_t)px << Q16_SHIFT);
+    data->mouse_acc_y -= (q16_t)((uint32_t)(int32_t)py << Q16_SHIFT);
 
     if (px != 0 || py != 0) {
         zmk_analog_stick_hid_move_add(px, py);
@@ -324,20 +324,20 @@ static void process_scroll_mode(struct listener_data *data,
     /* Scale deflection by divisor to get scroll rate.
      * At max deflection (127), rate = 127/divisor ticks per poll.
      * At min deflection, rate is tiny and accumulates over cycles. */
-    q16_t rate_x = ((int32_t)x << Q16_SHIFT) / divisor;
-    q16_t rate_y = ((int32_t)y << Q16_SHIFT) / divisor;
+    q16_t rate_x = (q16_t)((uint32_t)(int32_t)x << Q16_SHIFT) / divisor;
+    q16_t rate_y = (q16_t)((uint32_t)(int32_t)y << Q16_SHIFT) / divisor;
 
     /* Negate Y for natural scroll direction (stick up = scroll up) */
-    rate_y = -rate_y;
+    rate_y = q16_neg(rate_y);
 
-    data->scroll_acc_x += rate_x;
-    data->scroll_acc_y += rate_y;
+    data->scroll_acc_x = q16_sat_add(data->scroll_acc_x, rate_x);
+    data->scroll_acc_y = q16_sat_add(data->scroll_acc_y, rate_y);
 
     int16_t sx = (int16_t)(data->scroll_acc_x >> Q16_SHIFT);
     int16_t sy = (int16_t)(data->scroll_acc_y >> Q16_SHIFT);
 
-    data->scroll_acc_x -= (q16_t)sx << Q16_SHIFT;
-    data->scroll_acc_y -= (q16_t)sy << Q16_SHIFT;
+    data->scroll_acc_x -= (q16_t)((uint32_t)(int32_t)sx << Q16_SHIFT);
+    data->scroll_acc_y -= (q16_t)((uint32_t)(int32_t)sy << Q16_SHIFT);
 
     if (sx != 0 || sy != 0) {
         zmk_analog_stick_hid_scroll_add(sx, sy);

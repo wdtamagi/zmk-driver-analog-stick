@@ -7,24 +7,19 @@
  * - Groups sticks by enable GPIO for shared settling
  * - Reads all ADC channels per group with one settling wait
  * - Processes all sticks after all reads complete
- * - Calls HID flush and split coalescing at end of cycle
+ * - Calls HID flush at end of cycle
  * - Tracks negotiated BLE CI for adaptive poll floor
  */
-
-#define DT_DRV_COMPAT zmk_analog_stick
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/init.h>
+#include <zephyr/sys/util.h>
 
 #include <analog-stick/analog_stick_internal.h>
 #include <analog-stick/hid_accumulator.h>
-
-#if defined(CONFIG_ZMK_SPLIT) && !defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-#include <analog-stick/split_packed.h>
-#endif
 
 #if defined(CONFIG_ZMK_BLE) && !defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 #include <zephyr/bluetooth/conn.h>
@@ -84,6 +79,14 @@ static void build_gpio_groups(void) {
                     break;
                 }
             }
+        } else {
+            /* Find the single shared no-GPIO group */
+            for (size_t g = 0; g < group_count; g++) {
+                if (!groups[g].has_gpio) {
+                    found = (int)g;
+                    break;
+                }
+            }
         }
 
         if (found < 0) {
@@ -128,7 +131,7 @@ static atomic_t negotiated_ci_ms = ATOMIC_INIT(0);
 static void on_le_param_updated(struct bt_conn *conn, uint16_t interval,
                                 uint16_t latency, uint16_t timeout) {
     /* interval is in 1.25ms units; convert to ms */
-    int32_t ci = (int32_t)(interval * 5 / 4);
+    int32_t ci = (int32_t)((interval * 5 + 3) / 4);
     atomic_set(&negotiated_ci_ms, ci);
 
     int32_t ci_floor;
@@ -167,7 +170,7 @@ static void scan_coordinator_work_handler(struct k_work *work) {
         if (grp->has_gpio && grp->any_pulse_read &&
             !group_pulse_suppressed[g]) {
             gpio_pin_set_dt(grp->gpio, 1);
-            if (grp->settling_us <= 1000) {
+            if (grp->settling_us <= 50) {
                 k_busy_wait(grp->settling_us);
             } else {
                 k_sleep(K_USEC(grp->settling_us));
@@ -194,14 +197,7 @@ static void scan_coordinator_work_handler(struct k_work *work) {
     /* --- Phase 3: HID flush (one combined report for all sticks) --- */
     zmk_analog_stick_hid_flush();
 
-    /* --- Phase 4: Split transport coalescing --- */
-#if defined(CONFIG_ZMK_SPLIT) && !defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-#if IS_ENABLED(CONFIG_ZMK_ANALOG_STICK_SPLIT_PACKED)
-    analog_stick_split_coalesce_and_send();
-#endif
-#endif
-
-    /* --- Phase 5: Adaptive rate selection and pulse-read management --- */
+    /* --- Phase 4: Adaptive rate selection and pulse-read management --- */
     bool any_active = false;
     int32_t min_active_ms = INT32_MAX;
     int32_t max_idle_ms = 0;
@@ -278,22 +274,26 @@ static void scan_coordinator_work_handler(struct k_work *work) {
 
 #define REGISTER_STICK(n)                                                      \
     if (stick_count < MAX_STICKS) {                                            \
-        const struct device *dev = DEVICE_DT_GET(DT_DRV_INST(n));             \
-        stick_registry[stick_count].dev = dev;                                 \
-        stick_registry[stick_count].enable_gpio =                              \
-            analog_stick_get_enable_gpio(dev);                                 \
-        stick_registry[stick_count].has_gpio =                                 \
-            analog_stick_has_enable_gpio(dev);                                 \
-        stick_registry[stick_count].pulse_read =                               \
-            analog_stick_has_pulse_read(dev);                                  \
-        stick_registry[stick_count].settling_us =                              \
-            analog_stick_get_settling_us(dev);                                 \
-        stick_count++;                                                         \
+        const struct device *dev = DEVICE_DT_GET(n);                          \
+        if (!device_is_ready(dev)) {                                           \
+            LOG_ERR("analog stick device not ready, skipping");                \
+        } else {                                                               \
+            stick_registry[stick_count].dev = dev;                             \
+            stick_registry[stick_count].enable_gpio =                          \
+                analog_stick_get_enable_gpio(dev);                             \
+            stick_registry[stick_count].has_gpio =                             \
+                analog_stick_has_enable_gpio(dev);                             \
+            stick_registry[stick_count].pulse_read =                           \
+                analog_stick_has_pulse_read(dev);                              \
+            stick_registry[stick_count].settling_us =                          \
+                analog_stick_get_settling_us(dev);                             \
+            stick_count++;                                                     \
+        }                                                                      \
     }
 
 static int scan_coordinator_init(void) {
     stick_count = 0;
-    DT_INST_FOREACH_STATUS_OKAY(REGISTER_STICK)
+    DT_FOREACH_STATUS_OKAY(zmk_analog_stick, REGISTER_STICK)
 
     if (stick_count == 0) {
         LOG_WRN("No analog stick instances found");
@@ -310,20 +310,23 @@ static int scan_coordinator_init(void) {
 
     k_work_init_delayable(&scan_work, scan_coordinator_work_handler);
 
-    /* Start scanning at the slowest idle rate */
-    int32_t max_idle = 0;
+    /* Start scanning at the fastest idle rate so no stick is starved at boot */
+    int32_t min_idle = INT32_MAX;
     for (size_t i = 0; i < stick_count; i++) {
         int32_t ip = analog_stick_get_wait_period_idle(stick_registry[i].dev);
-        if (ip > max_idle) {
-            max_idle = ip;
+        if (ip < min_idle) {
+            min_idle = ip;
         }
+    }
+    if (min_idle == INT32_MAX) {
+        min_idle = 0;
     }
 
     k_work_schedule_for_queue(&analog_stick_wq, &scan_work,
-                              K_MSEC(max_idle > 0 ? max_idle : 100));
+                              K_MSEC(min_idle > 0 ? min_idle : 100));
 
     LOG_INF("Scan coordinator started: %zu sticks, initial poll %d ms",
-            stick_count, max_idle > 0 ? max_idle : 100);
+            stick_count, min_idle > 0 ? min_idle : 100);
 
     return 0;
 }

@@ -9,11 +9,19 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/util.h>
 
 #include <analog-stick/hid_accumulator.h>
 #include <zmk/hid.h>
 #include <zmk/endpoints.h>
 
+/*
+ * Thread safety: all accumulators below are accessed exclusively from the
+ * analog stick work queue (single-threaded contract). The scan coordinator
+ * work handler calls hid_move_add, hid_scroll_add, and hid_flush in sequence
+ * without yielding between them. If multi-queue access is ever introduced,
+ * protect these globals with a k_spinlock.
+ */
 static int32_t acc_dx, acc_dy;
 static int32_t acc_sx, acc_sy;
 static bool acc_dirty;
@@ -42,8 +50,12 @@ void zmk_analog_stick_hid_flush(void) {
         return;
     }
 
-    zmk_hid_mouse_movement_set(acc_dx, acc_dy);
-    zmk_hid_mouse_scroll_set(acc_sx, acc_sy);
+    zmk_hid_mouse_movement_update(
+        (int16_t)CLAMP(acc_dx, INT16_MIN, INT16_MAX),
+        (int16_t)CLAMP(acc_dy, INT16_MIN, INT16_MAX));
+    zmk_hid_mouse_scroll_set(
+        (int8_t)CLAMP(acc_sx, INT8_MIN, INT8_MAX),
+        (int8_t)CLAMP(acc_sy, INT8_MIN, INT8_MAX));
     zmk_endpoint_send_mouse_report();
 
     acc_dx = 0;
