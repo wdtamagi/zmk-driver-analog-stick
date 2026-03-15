@@ -332,4 +332,4 @@ static int scan_coordinator_init(void) {
 }
 
 SYS_INIT(scan_coordinator_init, APPLICATION,
-         CONFIG_ZMK_ANALOG_STICK_INIT_PRIORITY + 1);
+         CONFIG_APPLICATION_INIT_PRIORITY);
