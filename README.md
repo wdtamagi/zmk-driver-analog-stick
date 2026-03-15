@@ -105,25 +105,65 @@ manifest:
 
 ### Layer-Aware Input Listener
 
+Switch mode directions are **keymap positions** — they appear in the matrix transform and keymap just like physical keys. This enables ZMK Studio editing and full behavior support (`&kp`, `&mo`, `&lt`, `&tog`, etc.).
+
 ```dts
 #include <dt-bindings/analog-stick/modes.h>
+#include <behaviors.dtsi>
 #include <dt-bindings/zmk/keys.h>
 
 / {
+    /* Matrix transform: positions 0-1 are physical keys,
+       positions 2-5 are stick0 directions */
+    default_transform: keymap_transform_0 {
+        compatible = "zmk,matrix-transform";
+        columns = <6>;
+        rows = <1>;
+        map = <RC(0,0) RC(0,1) RC(0,2) RC(0,3) RC(0,4) RC(0,5)>;
+    };
+
+    /* Physical layout: stick directions shown as a d-pad cluster */
+    physical_layout0: physical_layout_0 {
+        compatible = "zmk,physical-layout";
+        display-name = "Default Layout";
+        kscan = <&kscan>;
+        transform = <&default_transform>;
+        keys
+            = <&key_physical_attrs 100 100   0   0  0 0 0>  /* key 0 */
+            , <&key_physical_attrs 100 100 100   0  0 0 0>  /* key 1 */
+            , <&key_physical_attrs  50  50 250  25  0 0 0>  /* stick0 up */
+            , <&key_physical_attrs  50  50 250 125  0 0 0>  /* stick0 down */
+            , <&key_physical_attrs  50  50 200  75  0 0 0>  /* stick0 left */
+            , <&key_physical_attrs  50  50 300  75  0 0 0>  /* stick0 right */
+            ;
+    };
+
+    /* Keymap: bindings at stick positions are editable via ZMK Studio */
+    keymap {
+        compatible = "zmk,keymap";
+        default_layer {
+            bindings = <&kp A &kp B &kp UP &kp DOWN &kp LEFT &kp RIGHT>;
+        };
+        mouse_layer {
+            bindings = <&kp A &kp B &none &none &none &none>;
+        };
+    };
+
+    /* Listener: references keymap position indices for switch mode */
     analog_stick_listener0: analog_stick_listener0 {
         compatible = "zmk,analog-stick-listener";
         device = <&analog_stick0>;
 
-        /* Layer 0: Arrow keys */
+        /* Layer 0: Switch mode — directions trigger keymap behaviors */
         layer0 {
             layers = <0>;
             mode = <ANALOG_STICK_MODE_SWITCH>;
             switch-activation-point = <40>;
             switch-hysteresis = <4>;
-            up-keycode = <UP>;
-            down-keycode = <DOWN>;
-            left-keycode = <LEFT>;
-            right-keycode = <RIGHT>;
+            up-position = <2>;
+            down-position = <3>;
+            left-position = <4>;
+            right-position = <5>;
         };
 
         /* Layer 1: Mouse pointer */
@@ -132,13 +172,6 @@ manifest:
             mode = <ANALOG_STICK_MODE_MOUSE>;
             mouse-min-speed = <1>;
             mouse-max-speed = <20>;
-        };
-
-        /* Layer 2: Scroll wheel */
-        layer2 {
-            layers = <2>;
-            mode = <ANALOG_STICK_MODE_SCROLL>;
-            scroll-divisor = <4>;
         };
     };
 };
@@ -326,10 +359,10 @@ Typical 12-bit MCP3208 values: min ~200, center ~2048, max ~3900.
 | `mode` | int | yes | — | Mode constant (0=switch, 1=mouse, 2=scroll) |
 | `switch-activation-point` | int | no | 40 | Switch mode threshold [0-127] |
 | `switch-hysteresis` | int | no | 4 | Hysteresis for switch deactivation |
-| `up-keycode` | int | no | 0 | Up key (switch mode) |
-| `down-keycode` | int | no | 0 | Down key (switch mode) |
-| `left-keycode` | int | no | 0 | Left key (switch mode) |
-| `right-keycode` | int | no | 0 | Right key (switch mode) |
+| `up-position` | int | no | — | Keymap position index for up direction (switch mode) |
+| `down-position` | int | no | — | Keymap position index for down direction (switch mode) |
+| `left-position` | int | no | — | Keymap position index for left direction (switch mode) |
+| `right-position` | int | no | — | Keymap position index for right direction (switch mode) |
 | `mouse-min-speed` | int | no | 1 | Min cursor speed (mouse mode) |
 | `mouse-max-speed` | int | no | 15 | Max cursor speed (mouse mode) |
 | `scroll-divisor` | int | no | 4 | Scroll rate divisor (scroll mode) |
@@ -349,6 +382,12 @@ notification per scan cycle.
 - **`filter-coefficients`** type changed from `uint8-array` to `array`. Update values from byte arrays to IEEE-754 uint32 hex integers.
 - **`switch-activation-point`** and **`switch-hysteresis`** moved from the driver node (`zmk,analog-stick`) to the listener's per-layer child node (`zmk,analog-stick-listener` child). Move these properties in your overlay.
 - **`read-turn-on-time`** default changed from 5000µs to 100µs (optimized for TMR sensors). Hall-effect users with `pulse-read` enabled must add `read-turn-on-time = <5000>` (or their sensor's required value) to their overlay.
+
+### Switch mode: keycodes to keymap positions
+
+- **`up-keycode`**, **`down-keycode`**, **`left-keycode`**, **`right-keycode`** removed from the listener child binding. Replaced with **`up-position`**, **`down-position`**, **`left-position`**, **`right-position`** which reference keymap position indices.
+- Stick directions must now be defined as positions in the matrix transform and physical layout, with behavior bindings in the keymap. This enables ZMK Studio editing and support for any ZMK behavior (`&kp`, `&mo`, `&lt`, `&tog`, etc.).
+- Migration steps: (1) add stick direction entries to your matrix transform, (2) add matching keys to your physical layout, (3) add behavior bindings at those positions in each keymap layer, (4) update listener child nodes to use `up-position = <N>` etc.
 
 ## License
 

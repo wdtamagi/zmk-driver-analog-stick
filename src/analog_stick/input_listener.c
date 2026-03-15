@@ -15,9 +15,11 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util_macro.h>
 
-#include <zmk/endpoints.h>
-#include <zmk/hid.h>
 #include <zmk/keymap.h>
+
+/* Note: zmk/hid.h and zmk/endpoints.h no longer needed — switch mode uses
+ * zmk_keymap_position_state_changed() instead of direct HID calls.
+ * Mouse/scroll modes use hid_accumulator.h which handles HID internally. */
 
 #include <dt-bindings/analog-stick/modes.h>
 
@@ -35,10 +37,10 @@ struct layer_config {
     uint8_t mode;
 
     /* Switch mode */
-    uint32_t up_keycode;
-    uint32_t down_keycode;
-    uint32_t left_keycode;
-    uint32_t right_keycode;
+    uint32_t up_position;
+    uint32_t down_position;
+    uint32_t left_position;
+    uint32_t right_position;
     int32_t switch_activation_point;
     int32_t switch_hysteresis;
 
@@ -119,34 +121,27 @@ static const struct layer_config *resolve_layer_config(
 /* Mode transition cleanup                                                    */
 /* -------------------------------------------------------------------------- */
 
-static void release_all_keys(struct listener_data *data,
-                             const struct layer_config *old_cfg) {
-    if (!old_cfg) return;
-
-    if (data->pressed_dirs & DIR_UP) {
-        zmk_hid_keyboard_release(old_cfg->up_keycode);
-    }
-    if (data->pressed_dirs & DIR_DOWN) {
-        zmk_hid_keyboard_release(old_cfg->down_keycode);
-    }
-    if (data->pressed_dirs & DIR_LEFT) {
-        zmk_hid_keyboard_release(old_cfg->left_keycode);
-    }
-    if (data->pressed_dirs & DIR_RIGHT) {
-        zmk_hid_keyboard_release(old_cfg->right_keycode);
-    }
-    if (data->pressed_dirs != 0) {
-        zmk_endpoint_send_report(HID_USAGE_KEY);
-        data->pressed_dirs = 0;
-    }
-}
-
 static void cleanup_mode(struct listener_data *data,
                          const struct layer_config *old_cfg,
                          uint8_t old_mode) {
     switch (old_mode) {
     case ANALOG_STICK_MODE_SWITCH:
-        release_all_keys(data, old_cfg);
+        if (old_cfg) {
+            int64_t ts = k_uptime_get();
+            if (data->pressed_dirs & DIR_UP) {
+                zmk_keymap_position_state_changed(0, old_cfg->up_position, false, ts);
+            }
+            if (data->pressed_dirs & DIR_DOWN) {
+                zmk_keymap_position_state_changed(0, old_cfg->down_position, false, ts);
+            }
+            if (data->pressed_dirs & DIR_LEFT) {
+                zmk_keymap_position_state_changed(0, old_cfg->left_position, false, ts);
+            }
+            if (data->pressed_dirs & DIR_RIGHT) {
+                zmk_keymap_position_state_changed(0, old_cfg->right_position, false, ts);
+            }
+        }
+        data->pressed_dirs = 0;
         break;
     case ANALOG_STICK_MODE_MOUSE:
         data->mouse_acc_x = 0;
@@ -164,7 +159,6 @@ static void cleanup_mode(struct listener_data *data,
 /* -------------------------------------------------------------------------- */
 
 static void process_switch_mode(struct listener_data *data,
-                                const struct listener_config *cfg_top,
                                 const struct layer_config *lcfg,
                                 int32_t activation, int32_t hysteresis) {
     int16_t x = data->abs_x;
@@ -174,7 +168,6 @@ static void process_switch_mode(struct listener_data *data,
     if (deact < 0) deact = 0;
 
     uint8_t new_dirs = 0;
-    bool changed = false;
 
     /* Right: positive X */
     if (x > act || ((data->pressed_dirs & DIR_RIGHT) && x > deact)) {
@@ -193,46 +186,35 @@ static void process_switch_mode(struct listener_data *data,
         new_dirs |= DIR_UP;
     }
 
-    /* Detect changes and emit key events */
+    /* Detect changes and invoke keymap behaviors */
     uint8_t pressed = new_dirs & ~data->pressed_dirs;
     uint8_t released = data->pressed_dirs & ~new_dirs;
+    int64_t ts = k_uptime_get();
 
     if (pressed & DIR_UP) {
-        zmk_hid_keyboard_press(lcfg->up_keycode);
-        changed = true;
+        zmk_keymap_position_state_changed(0, lcfg->up_position, true, ts);
     }
     if (pressed & DIR_DOWN) {
-        zmk_hid_keyboard_press(lcfg->down_keycode);
-        changed = true;
+        zmk_keymap_position_state_changed(0, lcfg->down_position, true, ts);
     }
     if (pressed & DIR_LEFT) {
-        zmk_hid_keyboard_press(lcfg->left_keycode);
-        changed = true;
+        zmk_keymap_position_state_changed(0, lcfg->left_position, true, ts);
     }
     if (pressed & DIR_RIGHT) {
-        zmk_hid_keyboard_press(lcfg->right_keycode);
-        changed = true;
+        zmk_keymap_position_state_changed(0, lcfg->right_position, true, ts);
     }
 
     if (released & DIR_UP) {
-        zmk_hid_keyboard_release(lcfg->up_keycode);
-        changed = true;
+        zmk_keymap_position_state_changed(0, lcfg->up_position, false, ts);
     }
     if (released & DIR_DOWN) {
-        zmk_hid_keyboard_release(lcfg->down_keycode);
-        changed = true;
+        zmk_keymap_position_state_changed(0, lcfg->down_position, false, ts);
     }
     if (released & DIR_LEFT) {
-        zmk_hid_keyboard_release(lcfg->left_keycode);
-        changed = true;
+        zmk_keymap_position_state_changed(0, lcfg->left_position, false, ts);
     }
     if (released & DIR_RIGHT) {
-        zmk_hid_keyboard_release(lcfg->right_keycode);
-        changed = true;
-    }
-
-    if (changed) {
-        zmk_endpoint_send_report(HID_USAGE_KEY);
+        zmk_keymap_position_state_changed(0, lcfg->right_position, false, ts);
     }
 
     data->pressed_dirs = new_dirs;
@@ -391,7 +373,7 @@ static void input_handler(const struct listener_config *config,
     /* Dispatch to mode handler */
     switch (data->current_mode) {
     case ANALOG_STICK_MODE_SWITCH:
-        process_switch_mode(data, config, new_cfg,
+        process_switch_mode(data, new_cfg,
                             new_cfg->switch_activation_point,
                             new_cfg->switch_hysteresis);
         break;
@@ -418,10 +400,10 @@ static void input_handler(const struct listener_config *config,
         .layer_mask = DT_FOREACH_PROP_ELEM_SEP(                                \
             node, layers, OVERRIDE_LAYER_BIT, (|)),                            \
         .mode = DT_PROP(node, mode),                                           \
-        .up_keycode = DT_PROP(node, up_keycode),                               \
-        .down_keycode = DT_PROP(node, down_keycode),                           \
-        .left_keycode = DT_PROP(node, left_keycode),                           \
-        .right_keycode = DT_PROP(node, right_keycode),                         \
+        .up_position    = DT_PROP(node, up_position),                           \
+        .down_position  = DT_PROP(node, down_position),                        \
+        .left_position  = DT_PROP(node, left_position),                        \
+        .right_position = DT_PROP(node, right_position),                       \
         .switch_activation_point = DT_PROP(node, switch_activation_point),   \
         .switch_hysteresis = DT_PROP(node, switch_hysteresis),               \
         .mouse_min_speed = DT_PROP(node, mouse_min_speed),                     \

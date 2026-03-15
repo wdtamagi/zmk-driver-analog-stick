@@ -31,25 +31,25 @@ child-binding:
         ANALOG_STICK_MODE_SWITCH (0), ANALOG_STICK_MODE_MOUSE (1),
         ANALOG_STICK_MODE_SCROLL (2).
 
-    up-keycode:
+    up-position:
       type: int
-      default: 0
-      description: HID keycode for up direction (switch mode).
+      required: false
+      description: Keymap position index for up direction (switch mode).
 
-    down-keycode:
+    down-position:
       type: int
-      default: 0
-      description: HID keycode for down direction (switch mode).
+      required: false
+      description: Keymap position index for down direction (switch mode).
 
-    left-keycode:
+    left-position:
       type: int
-      default: 0
-      description: HID keycode for left direction (switch mode).
+      required: false
+      description: Keymap position index for left direction (switch mode).
 
-    right-keycode:
+    right-position:
       type: int
-      default: 0
-      description: HID keycode for right direction (switch mode).
+      required: false
+      description: Keymap position index for right direction (switch mode).
 
     switch-activation-point:
       type: int
