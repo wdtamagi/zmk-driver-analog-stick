@@ -418,10 +418,10 @@ static void input_handler(const struct listener_config *config,
         .layer_mask = DT_FOREACH_PROP_ELEM_SEP(                                \
             node, layers, OVERRIDE_LAYER_BIT, (|)),                            \
         .mode = DT_PROP(node, mode),                                           \
-        .up_position    = DT_PROP(node, up_position),                           \
-        .down_position  = DT_PROP(node, down_position),                        \
-        .left_position  = DT_PROP(node, left_position),                        \
-        .right_position = DT_PROP(node, right_position),                       \
+        .up_position    = DT_PROP_OR(node, up_position, 0),                      \
+        .down_position  = DT_PROP_OR(node, down_position, 0),                  \
+        .left_position  = DT_PROP_OR(node, left_position, 0),                  \
+        .right_position = DT_PROP_OR(node, right_position, 0),                 \
         .switch_activation_point = DT_PROP(node, switch_activation_point),   \
         .switch_hysteresis = DT_PROP(node, switch_hysteresis),               \
         .mouse_min_speed = DT_PROP(node, mouse_min_speed),                     \

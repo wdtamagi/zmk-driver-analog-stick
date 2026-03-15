@@ -676,6 +676,24 @@ static int analog_stick_pm_action(const struct device *dev,
 #define IMPLIES(a, b) (!(a) || (b))
 #endif
 
+/* Y-axis init: ADC_DT_SPEC_GET_BY_IDX(node, 1) eagerly expands on Zephyr 3.5
+ * even inside COND_CODE_1 false branches, causing a token-pasting error when
+ * io-channels has only 1 entry. Work around this by always using index 0 as a
+ * dummy when has_y is false — the Y ADC spec is never actually used in that
+ * case, so the value doesn't matter. */
+#define ANALOG_STICK_Y_ADC_IDX(n)                                              \
+    COND_CODE_1(DT_INST_PROP_HAS_IDX(n, io_channels, 1), (1), (0))
+
+#define ANALOG_STICK_Y_AXIS_INIT(n)                                            \
+    .y = {                                                                     \
+        .adc = ADC_DT_SPEC_GET_BY_IDX(DT_DRV_INST(n),                        \
+                                       ANALOG_STICK_Y_ADC_IDX(n)),            \
+        .min = DT_INST_PROP(n, y_min),                                         \
+        .center = DT_INST_PROP(n, y_center),                                   \
+        .max = DT_INST_PROP(n, y_max),                                         \
+        .invert = DT_INST_PROP(n, invert_y),                                   \
+    },
+
 #define ANALOG_STICK_FILTER_COEFFS(n)                                          \
     COND_CODE_1(HAS_PROP(n, filter_coefficients),                              \
         ({                                                                     \
@@ -721,14 +739,7 @@ static int analog_stick_pm_action(const struct device *dev,
         },                                                                     \
                                                                                \
         .has_y = DT_INST_PROP_HAS_IDX(n, io_channels, 1),                     \
-        IF_ENABLED(DT_INST_PROP_HAS_IDX(n, io_channels, 1),                   \
-            (.y = {                                                            \
-                .adc = ADC_DT_SPEC_GET_BY_IDX(DT_DRV_INST(n), 1),            \
-                .min = DT_INST_PROP(n, y_min),                                 \
-                .center = DT_INST_PROP(n, y_center),                           \
-                .max = DT_INST_PROP(n, y_max),                                 \
-                .invert = DT_INST_PROP(n, invert_y),                           \
-            },))                                                               \
+        ANALOG_STICK_Y_AXIS_INIT(n)                                            \
                                                                                \
         .deadzone = DT_INST_PROP(n, deadzone),                                 \
         .deadzone_percent = DT_INST_PROP(n, deadzone_percent),                 \
