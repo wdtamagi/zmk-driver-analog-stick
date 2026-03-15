@@ -51,6 +51,20 @@ child-binding:
       default: 0
       description: HID keycode for right direction (switch mode).
 
+    switch-activation-point:
+      type: int
+      default: 40
+      description: |
+        Threshold for switch mode activation in rescaled output units [0-127].
+        When the axis value exceeds this threshold, a key press is generated.
+
+    switch-hysteresis:
+      type: int
+      default: 4
+      description: |
+        Hysteresis band for switch mode deactivation. Key release occurs
+        when value drops below (activation-point - hysteresis).
+
     mouse-min-speed:
       type: int
       default: 1

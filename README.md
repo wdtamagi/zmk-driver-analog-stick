@@ -1,6 +1,6 @@
 # ZMK Analog Stick Driver
 
-Multi-mode analog stick driver for ZMK firmware. Reads hall-effect sensors via Zephyr ADC `io-channels` and supports three runtime modes switchable per keymap layer:
+Multi-mode analog stick driver for ZMK firmware. Reads analog position sensors (TMR, hall-effect, etc.) via Zephyr ADC `io-channels` and supports three runtime modes switchable per keymap layer:
 
 - **Switch mode** — Joystick acts as 4 (or 8 diagonal) directional keys with configurable threshold and hysteresis
 - **Mouse pointer mode** — Distance from center controls cursor speed with acceleration ramp
@@ -12,9 +12,9 @@ Multi-mode analog stick driver for ZMK firmware. Reads hall-effect sensors via Z
 - Works with any Zephyr-supported ADC (MCP3208, nRF52840 SAADC, etc.) via `io-channels`
 - Split keyboard support (peripheral → central → host)
 - IIR biquad filter for noise reduction
-- Circular deadzone for uniform mouse behavior
+- Per-axis linear deadzone
 - Adaptive idle/active poll rates for power savings
-- Pulse-read sensor power gating via GPIO
+- Pulse-read sensor power gating via GPIO with auto-disable at high duty cycle
 - Q16.16 fixed-point math on all hot paths
 - Up to 8 joysticks (16 sensors) per keyboard half
 
@@ -86,8 +86,6 @@ manifest:
         deadzone = <50>;
         wait-period-idle = <100>;
         wait-period-active = <1>;
-        switch-activation-point = <40>;
-        switch-hysteresis = <4>;
     };
 
     /* Second joystick on MCP3208 channels 2,3 */
@@ -120,6 +118,8 @@ manifest:
         layer0 {
             layers = <0>;
             mode = <ANALOG_STICK_MODE_SWITCH>;
+            switch-activation-point = <40>;
+            switch-hysteresis = <4>;
             up-keycode = <UP>;
             down-keycode = <DOWN>;
             left-keycode = <LEFT>;
@@ -187,26 +187,59 @@ analog_stick0: analog_stick0 {
     /* ... calibration ... */
     enable-gpios = <&gpio0 10 GPIO_ACTIVE_HIGH>;
     pulse-read;
-    read-turn-on-time = <3000>;  /* 3ms settling */
+    read-turn-on-time = <100>;  /* 100µs settling (TMR default) */
 };
 ```
 
-### Optional Biquad Filter
+> **Hall-effect users:** Set `read-turn-on-time = <5000>` (or your sensor's required value). The default 100µs is optimized for TMR sensors.
 
-Apply a low-pass IIR filter to reduce ADC noise:
+When the active poll rate makes pulse-read counterproductive (settling time > half the poll period), the driver automatically keeps sensors powered and logs a message. Pulse-read re-engages when the stick returns to idle.
+
+### Filtering
+
+Apply a 2nd-order Butterworth low-pass IIR filter to reduce sensor noise:
 
 ```dts
 analog_stick0: analog_stick0 {
     compatible = "zmk,analog-stick";
     /* ... other properties ... */
-    filter-coefficients = [
-        /* b0, b1, b2, a0(=1.0), a1, a2 as IEEE-754 bytes */
-        /* Example: 20Hz low-pass at 125Hz sample rate */
-        3D B1 4D A4  3D B1 4D A4  00 00 00 00
-        3F 80 00 00  BE DA 1B 71  3E 2C 68 05
-    ];
+    /* 25Hz cutoff at 125Hz sample rate (8ms poll) */
+    filter-coefficients = <0x3D8A3D71 0x3E0A3D71 0x3D8A3D71
+                           0x3F800000 0xBF927DBD 0x3ED32C9C>;
 };
 ```
+
+The six values are IEEE-754 uint32 hex representations of biquad coefficients (b0, b1, b2, a0, a1, a2). The example above provides a 25Hz cutoff suitable for the TMR noise profile at an 8ms active poll rate. **Coefficients must be recalculated for poll rates other than 8ms.** The cutoff frequency can be computed using the bilinear transform:
+
+```
+fc = desired cutoff (Hz), fs = 1000 / wait-period-active (Hz)
+```
+
+### Voltage Matching
+
+Both TMR and hall-effect sensors output a ratiometric voltage (output is a fraction of VDD). For accurate readings:
+
+- **MCP3208**: Sensor VDD must equal ADC VREF. The MCP3208 uses VREF as its full-scale reference. If VDD ≠ VREF, the output can exceed the ADC input range, causing clipping.
+- **nRF52840 SAADC**: The internal reference is 0.6V with an optional 1/6 gain prescaler (3.6V effective range). For 3.3V sensors, use the 1/6 prescaler. If sensor VDD exceeds the effective range, add a resistive voltage divider on the sensor output or adjust the SAADC gain setting in your board's DTS.
+
+### SAADC Oversampling
+
+For nRF52840 SAADC users, 4× or 8× oversampling significantly reduces noise at the cost of longer conversion time:
+
+```dts
+&adc {
+    #address-cells = <1>;
+    #size-cells = <0>;
+
+    channel@0 {
+        reg = <0>;
+        zephyr,oversampling = <4>;  /* 4× oversampling */
+        /* ... other channel config ... */
+    };
+};
+```
+
+The `oversampling` property is on the SAADC channel node, not on the analog stick driver node. Each doubling of oversampling doubles conversion time (~36µs per sample at 4× on nRF52840). With 8 joysticks this adds to the per-scan budget, but remains well within the BLE poll floor.
 
 ## Calibration
 
@@ -225,7 +258,7 @@ Typical 12-bit MCP3208 values: min ~200, center ~2048, max ~3900.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `CONFIG_ZMK_ANALOG_STICK` | y (auto) | Enable the driver (auto-enabled by DT) |
-| `CONFIG_ZMK_ANALOG_STICK_WORK_QUEUE_STACK_SIZE` | 2048 | Work queue stack size |
+| `CONFIG_ZMK_ANALOG_STICK_WORK_QUEUE_STACK_SIZE` | 2560 | Work queue stack size |
 | `CONFIG_ZMK_ANALOG_STICK_BLE_POLL_FLOOR` | 8 | Min active poll interval (ms) when BLE enabled |
 | `CONFIG_ZMK_ANALOG_STICK_INIT_PRIORITY` | 90 | Device init priority (POST_KERNEL) |
 
@@ -242,17 +275,16 @@ Typical 12-bit MCP3208 values: min ~200, center ~2048, max ~3900.
 | `y-min` | int | no | 0 | Raw ADC at min Y deflection |
 | `y-center` | int | no | 0 | Raw ADC at Y rest position |
 | `y-max` | int | no | 0 | Raw ADC at max Y deflection |
-| `deadzone` | int | no | 50 | Deadzone in raw ADC units |
+| `deadzone` | int | no | 50 | Per-axis linear deadzone in raw ADC units |
 | `invert-x` | boolean | no | false | Negate X axis |
 | `invert-y` | boolean | no | false | Negate Y axis |
 | `wait-period-idle` | int | no | 100 | Idle poll interval (ms) |
 | `wait-period-active` | int | no | 1 | Active poll interval (ms) |
 | `enable-gpios` | phandle-array | no | — | Sensor power GPIO |
 | `pulse-read` | boolean | no | false | Toggle power per read |
-| `read-turn-on-time` | int | no | 5000 | Settling time (µs) |
-| `switch-activation-point` | int | no | 40 | Switch mode threshold |
-| `switch-hysteresis` | int | no | 0 | Hysteresis band (0 = 10% of activation) |
-| `filter-coefficients` | uint8-array | no | — | 6 IEEE-754 biquad coefficients |
+| `read-turn-on-time` | int | no | 100 | Settling time (µs); TMR default, set 1000-5000 for hall-effect |
+| `inter-channel-settling-time` | int | no | 40 | Inter-channel ADC settling (µs); 40 for SAADC, 5 for MCP3208 |
+| `filter-coefficients` | array | no | — | 6 IEEE-754 uint32 biquad coefficients |
 
 ### zmk,analog-stick-listener
 
@@ -266,6 +298,8 @@ Typical 12-bit MCP3208 values: min ~200, center ~2048, max ~3900.
 |----------|------|----------|---------|-------------|
 | `layers` | array | yes | — | Layer indices |
 | `mode` | int | yes | — | Mode constant (0=switch, 1=mouse, 2=scroll) |
+| `switch-activation-point` | int | no | 40 | Switch mode threshold [0-127] |
+| `switch-hysteresis` | int | no | 4 | Hysteresis for switch deactivation |
 | `up-keycode` | int | no | 0 | Up key (switch mode) |
 | `down-keycode` | int | no | 0 | Down key (switch mode) |
 | `left-keycode` | int | no | 0 | Left key (switch mode) |
@@ -273,6 +307,14 @@ Typical 12-bit MCP3208 values: min ~200, center ~2048, max ~3900.
 | `mouse-min-speed` | int | no | 1 | Min cursor speed (mouse mode) |
 | `mouse-max-speed` | int | no | 15 | Max cursor speed (mouse mode) |
 | `scroll-divisor` | int | no | 4 | Scroll rate divisor (scroll mode) |
+
+## Migration Notes
+
+### From initial release to phase 1+2
+
+- **`filter-coefficients`** type changed from `uint8-array` to `array`. Update values from byte arrays to IEEE-754 uint32 hex integers.
+- **`switch-activation-point`** and **`switch-hysteresis`** moved from the driver node (`zmk,analog-stick`) to the listener's per-layer child node (`zmk,analog-stick-listener` child). Move these properties in your overlay.
+- **`read-turn-on-time`** default changed from 5000µs to 100µs (optimized for TMR sensors). Hall-effect users with `pulse-read` enabled must add `read-turn-on-time = <5000>` (or their sensor's required value) to their overlay.
 
 ## License
 

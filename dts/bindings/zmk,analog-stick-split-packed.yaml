@@ -1,0 +1,23 @@
+include: [base.yaml]
+
+compatible: "zmk,analog-stick-split-packed"
+
+description: |
+  ZMK analog stick packed split transport — coalesces all stick axis
+  changes into one BLE notification per scan cycle. Use for 5-8 stick
+  configurations. Requires matching packed transport on central.
+
+properties:
+  reg:
+    required: true
+
+  device:
+    type: phandle
+    description: |
+      Reference to the zmk,analog-stick device (peripheral side only).
+      Not needed on the central side.
+
+  pack-version:
+    type: int
+    default: 1
+    description: Packed format version for compatibility checking.

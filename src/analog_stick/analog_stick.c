@@ -3,9 +3,12 @@
  * SPDX-License-Identifier: MIT
  *
  * Multi-mode analog stick driver for ZMK.
- * Reads hall-effect sensors via Zephyr ADC io-channels and emits
+ * Reads analog position sensors via Zephyr ADC io-channels and emits
  * Zephyr input events (INPUT_EV_ABS). Mode-aware processing is
  * handled by a separate input listener.
+ *
+ * ADC reading and event emission are factored into per-stick functions
+ * called by the scan coordinator (scan_coordinator.c).
  */
 
 #define DT_DRV_COMPAT zmk_analog_stick
@@ -19,6 +22,9 @@
 #include <zephyr/pm/device.h>
 #include <string.h>
 
+#include <analog-stick/q16.h>
+#include <analog-stick/analog_stick_internal.h>
+
 LOG_MODULE_REGISTER(zmk_analog_stick, CONFIG_ZMK_ANALOG_STICK_LOG_LEVEL);
 
 BUILD_ASSERT(sizeof(float) == sizeof(uint32_t),
@@ -28,60 +34,32 @@ BUILD_ASSERT(((-1) >> 1) == -1,
              "This driver requires arithmetic right-shift for signed integers");
 
 /* -------------------------------------------------------------------------- */
-/* Q16.16 fixed-point arithmetic                                              */
+/* Q16.16 helpers local to the driver (not shared)                            */
 /* -------------------------------------------------------------------------- */
 
-typedef int32_t q16_t;
-#define Q16_SHIFT  16
-#define Q16_ONE    ((q16_t)(1U << Q16_SHIFT))
-
-static inline q16_t q16_from_int(int32_t v) {
-    if (v > 32767) return (q16_t)(32767U << Q16_SHIFT);
-    if (v < -32767) return (q16_t)((uint32_t)(int32_t)-32767 << Q16_SHIFT);
-    return (q16_t)((uint32_t)(int32_t)v << Q16_SHIFT);
-}
-
-static inline q16_t q16_mul(q16_t a, q16_t b) {
-    return (q16_t)(((int64_t)a * b) >> Q16_SHIFT);
-}
-
-static inline q16_t q16_div(q16_t a, q16_t b) {
-    if (b == 0) {
-        return (a >= 0) ? INT32_MAX : INT32_MIN;
-    }
-    return (q16_t)(((int64_t)a << Q16_SHIFT) / b);
-}
-
 static inline q16_t q16_abs(q16_t x) {
-    if (x == INT32_MIN) return INT32_MAX;
+    if (x == Q16_MIN) return Q16_MAX;
     return x < 0 ? -x : x;
 }
 
 static inline q16_t q16_neg(q16_t x) {
-    return (x == INT32_MIN) ? INT32_MAX : -x;
+    return (x == Q16_MIN) ? Q16_MAX : -x;
 }
 
 static inline q16_t q16_clamp(q16_t x, q16_t lo, q16_t hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
-static inline q16_t q16_sat_add(q16_t a, q16_t b) {
-    int64_t r = (int64_t)a + b;
-    if (r > INT32_MAX) return INT32_MAX;
-    if (r < INT32_MIN) return INT32_MIN;
-    return (q16_t)r;
-}
-
 static inline q16_t q16_from_float(float f) {
     if (f != f) return 0; /* NaN */
     float product = f * (float)Q16_ONE;
-    if (product > (float)INT32_MAX) return INT32_MAX;
-    if (product < (float)INT32_MIN) return INT32_MIN;
+    if (product > (float)Q16_MAX) return Q16_MAX;
+    if (product < (float)Q16_MIN) return Q16_MIN;
     return (q16_t)product;
 }
 
 static inline bool q16_is_valid(q16_t x) {
-    return x != INT32_MIN && x != INT32_MAX;
+    return x != Q16_MIN && x != Q16_MAX;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -122,15 +100,15 @@ static void biquad_prime(struct biquad_state *state,
 }
 
 /* -------------------------------------------------------------------------- */
-/* Dedicated work queue                                                       */
+/* Dedicated work queue (shared with scan coordinator)                        */
 /* -------------------------------------------------------------------------- */
 
 static K_THREAD_STACK_DEFINE(analog_stick_wq_stack,
                              CONFIG_ZMK_ANALOG_STICK_WORK_QUEUE_STACK_SIZE);
-static struct k_work_q analog_stick_wq;
+struct k_work_q analog_stick_wq;
 static atomic_t wq_started = ATOMIC_INIT(0);
 
-static void ensure_wq(void) {
+void analog_stick_ensure_wq(void) {
     if (atomic_cas(&wq_started, 0, 1)) {
         k_work_queue_init(&analog_stick_wq);
         k_work_queue_start(&analog_stick_wq, analog_stick_wq_stack,
@@ -169,8 +147,7 @@ struct analog_stick_config {
     struct axis_config y;
 
     int32_t deadzone;
-    int32_t switch_activation_point;
-    int32_t switch_hysteresis;
+    int32_t inter_channel_settling_us;
 
     bool has_filter;
     uint32_t filter_coeffs_raw[6];
@@ -178,12 +155,16 @@ struct analog_stick_config {
 
 struct analog_stick_data {
     const struct device *dev;
-    struct k_work_delayable poll_work;
 
     struct adc_sequence seq_x;
     struct adc_sequence seq_y;
 
     int32_t adc_buf[2]; /* [0]=X, [1]=Y — inlined, no DMA section needed */
+
+    /* Raw ADC values from last read (Q16.16), set by analog_stick_read_adc() */
+    q16_t raw_x;
+    q16_t raw_y;
+    int read_err; /* 0 on success, negative errno on ADC failure */
 
     struct biquad_state filter_x;
     struct biquad_state filter_y;
@@ -201,11 +182,46 @@ struct analog_stick_data {
 
     bool active;
     bool primed;
-
-#ifdef CONFIG_PM_DEVICE
-    struct k_work_sync work_sync;
-#endif
 };
+
+/* -------------------------------------------------------------------------- */
+/* Accessor functions for scan coordinator                                    */
+/* -------------------------------------------------------------------------- */
+
+const struct gpio_dt_spec *analog_stick_get_enable_gpio(const struct device *dev) {
+    const struct analog_stick_config *cfg = dev->config;
+    return cfg->has_enable_gpio ? &cfg->enable_gpio : NULL;
+}
+
+bool analog_stick_has_enable_gpio(const struct device *dev) {
+    const struct analog_stick_config *cfg = dev->config;
+    return cfg->has_enable_gpio;
+}
+
+bool analog_stick_has_pulse_read(const struct device *dev) {
+    const struct analog_stick_config *cfg = dev->config;
+    return cfg->pulse_read;
+}
+
+uint32_t analog_stick_get_settling_us(const struct device *dev) {
+    const struct analog_stick_config *cfg = dev->config;
+    return (uint32_t)cfg->read_turn_on_time;
+}
+
+bool analog_stick_is_active(const struct device *dev) {
+    struct analog_stick_data *data = dev->data;
+    return data->active;
+}
+
+int32_t analog_stick_get_wait_period_active(const struct device *dev) {
+    const struct analog_stick_config *cfg = dev->config;
+    return cfg->wait_period_active;
+}
+
+int32_t analog_stick_get_wait_period_idle(const struct device *dev) {
+    const struct analog_stick_config *cfg = dev->config;
+    return cfg->wait_period_idle;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Axis rescaling                                                             */
@@ -224,7 +240,7 @@ static q16_t rescale_axis(q16_t adc_val, const struct axis_config *ax,
     q16_t scaled;
     if (diff < 0) {
         if (inv_neg == 0) return 0;
-        scaled = q16_mul(diff + dz, inv_neg);
+        scaled = q16_mul(q16_sat_add(diff, dz), inv_neg);
     } else {
         if (inv_pos == 0) return 0;
         scaled = q16_mul(diff - dz, inv_pos);
@@ -259,65 +275,64 @@ static bool adc_at_rail(int32_t value, uint8_t resolution, uint8_t oversampling)
 }
 
 /* -------------------------------------------------------------------------- */
-/* Poll work handler                                                          */
+/* Per-stick ADC read (called by scan coordinator)                            */
 /* -------------------------------------------------------------------------- */
 
-static void analog_stick_poll_work(struct k_work *work) {
-    struct k_work_delayable *dwork = CONTAINER_OF(work, struct k_work_delayable, work);
-    struct analog_stick_data *data = CONTAINER_OF(dwork, struct analog_stick_data, poll_work);
-    const struct device *dev = data->dev;
+int analog_stick_read_adc(const struct device *dev) {
+    struct analog_stick_data *data = dev->data;
     const struct analog_stick_config *cfg = dev->config;
 
-    /* --- Power on --- */
-    if (cfg->pulse_read && cfg->has_enable_gpio) {
-        gpio_pin_set_dt(&cfg->enable_gpio, 1);
-        if (cfg->read_turn_on_time <= 1000) {
-            k_busy_wait((uint32_t)cfg->read_turn_on_time);
-        } else {
-            k_sleep(K_USEC(cfg->read_turn_on_time));
-        }
-    }
+    data->raw_x = 0;
+    data->raw_y = 0;
+    data->read_err = 0;
 
-    /* --- Read ADC --- */
     int err = adc_read(cfg->x.adc.dev, &data->seq_x);
     if (err) {
         LOG_ERR("X-axis ADC read failed: %d", err);
-        goto power_off;
+        data->read_err = err;
+        return err;
     }
-
-    q16_t raw_x = 0;
-    q16_t raw_y = 0;
 
     int32_t adc_x = data->adc_buf[0];
     if (adc_at_rail(adc_x, cfg->x.adc.resolution, cfg->x.adc.oversampling)) {
         LOG_DBG("X-axis at rail (%d)", adc_x);
         adc_x = cfg->x.center;
     }
-    raw_x = q16_from_int(adc_x);
+    data->raw_x = q16_from_int(adc_x);
 
     if (cfg->has_y) {
-        k_busy_wait(5); /* inter-channel settling */
+        k_busy_wait((uint32_t)cfg->inter_channel_settling_us);
         err = adc_read(cfg->y.adc.dev, &data->seq_y);
         if (err) {
             LOG_ERR("Y-axis ADC read failed: %d", err);
-            goto power_off;
+            data->read_err = err;
+            return err;
         }
         int32_t adc_y = data->adc_buf[1];
         if (adc_at_rail(adc_y, cfg->y.adc.resolution, cfg->y.adc.oversampling)) {
             LOG_DBG("Y-axis at rail (%d)", adc_y);
             adc_y = cfg->y.center;
         }
-        raw_y = q16_from_int(adc_y);
+        data->raw_y = q16_from_int(adc_y);
     }
 
-power_off:
-    if (cfg->pulse_read && cfg->has_enable_gpio) {
-        gpio_pin_set_dt(&cfg->enable_gpio, 0);
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Per-stick process and emit (called by scan coordinator)                    */
+/* -------------------------------------------------------------------------- */
+
+void analog_stick_process_and_emit(const struct device *dev) {
+    struct analog_stick_data *data = dev->data;
+    const struct analog_stick_config *cfg = dev->config;
+
+    if (data->read_err) {
+        return;
     }
 
-    if (err) {
-        goto reschedule;
-    }
+    q16_t raw_x = data->raw_x;
+    q16_t raw_y = data->raw_y;
 
     /* --- IIR filter --- */
     if (cfg->has_filter && data->active) {
@@ -346,56 +361,21 @@ skip_filter:;
                        data->inv_range_neg_y, data->inv_range_pos_y)
         : 0;
 
-    /* --- Circular deadzone for dual-axis --- */
-    if (cfg->has_y) {
-        int64_t dx = (int64_t)scaled_x;
-        int64_t dy = (int64_t)scaled_y;
-        q16_t dz = q16_from_int(cfg->deadzone);
-        /* Convert deadzone to Q16.16 fraction of range for comparison
-         * with scaled values. Since scaled values are in [-Q16_ONE, Q16_ONE],
-         * we need deadzone as a fraction. Use a simple threshold on the
-         * squared magnitude vs squared deadzone-fraction. */
-        /* For circular deadzone: if both individual per-axis deadzones
-         * already zeroed the values, the result is already (0,0).
-         * The per-axis linear deadzone in rescale_axis handles most cases.
-         * This additional check catches the diagonal case where each axis
-         * is individually above its linear deadzone but the combined
-         * magnitude is still inside the circular zone. */
-        if (scaled_x != 0 || scaled_y != 0) {
-            /* Use the smaller of the two per-axis deadzone fractions as
-             * the circular radius, expressed in the scaled output space */
-            q16_t range_x_min = q16_from_int(cfg->x.center - cfg->x.min);
-            q16_t range_y_min = q16_from_int(cfg->y.center - cfg->y.min);
-            q16_t frac_x = (range_x_min > 0) ? q16_div(dz, range_x_min) : 0;
-            q16_t frac_y = (range_y_min > 0) ? q16_div(dz, range_y_min) : 0;
-            /* Use average fraction as circular radius in output space */
-            q16_t circ_dz = (frac_x + frac_y) / 2;
-            int64_t circ_dz2 = (int64_t)circ_dz * circ_dz;
-            int64_t mag2 = (dx * dx + dy * dy) >> Q16_SHIFT;
-            if (mag2 < (circ_dz2 >> Q16_SHIFT)) {
-                scaled_x = 0;
-                scaled_y = 0;
-            }
-        }
-    }
-
     /* --- Map to output range [-127, 127] --- */
     int16_t out_x = (int16_t)(((int32_t)scaled_x * 127) >> Q16_SHIFT);
     int16_t out_y = (int16_t)(((int32_t)scaled_y * 127) >> Q16_SHIFT);
 
     /* --- Emit input events on change --- */
-    if (out_x != data->prev_x || out_y != data->prev_y) {
+    bool x_changed = (out_x != data->prev_x);
+    bool y_changed = (out_y != data->prev_y);
+
+    if (x_changed || y_changed) {
         if (cfg->has_y) {
-            if (out_x != data->prev_x) {
-                input_report_abs(dev, INPUT_ABS_X, out_x, false, K_NO_WAIT);
+            if (x_changed) {
+                input_report_abs(dev, INPUT_ABS_X, out_x, !y_changed, K_NO_WAIT);
             }
-            if (out_y != data->prev_y) {
-                input_report_abs(dev, INPUT_ABS_Y, out_y,
-                                 out_x == data->prev_x, K_NO_WAIT);
-            }
-            /* If only X changed, send sync */
-            if (out_x != data->prev_x && out_y == data->prev_y) {
-                input_report_abs(dev, INPUT_ABS_X, out_x, true, K_NO_WAIT);
+            if (y_changed) {
+                input_report_abs(dev, INPUT_ABS_Y, out_y, true, K_NO_WAIT);
             }
         } else {
             input_report_abs(dev, INPUT_ABS_X, out_x, true, K_NO_WAIT);
@@ -406,16 +386,6 @@ skip_filter:;
 
     /* --- Activity detection --- */
     data->active = (out_x != 0 || out_y != 0);
-
-reschedule: {
-    int32_t period = data->active ? cfg->wait_period_active : cfg->wait_period_idle;
-#if IS_ENABLED(CONFIG_ZMK_BLE)
-    if (data->active && period < CONFIG_ZMK_ANALOG_STICK_BLE_POLL_FLOOR) {
-        period = CONFIG_ZMK_ANALOG_STICK_BLE_POLL_FLOOR;
-    }
-#endif
-    k_work_schedule_for_queue(&analog_stick_wq, &data->poll_work, K_MSEC(period));
-    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -554,7 +524,7 @@ static int analog_stick_init(const struct device *dev) {
         return -EINVAL;
     }
 
-    ensure_wq();
+    analog_stick_ensure_wq();
 
     /* GPIO setup */
     if (cfg->has_enable_gpio) {
@@ -607,10 +577,7 @@ static int analog_stick_init(const struct device *dev) {
                                  &data->inv_range_neg_y, &data->inv_range_pos_y);
     }
 
-    /* Start polling */
-    k_work_init_delayable(&data->poll_work, analog_stick_poll_work);
-    k_work_schedule_for_queue(&analog_stick_wq, &data->poll_work,
-                              K_MSEC(cfg->wait_period_idle));
+    /* Polling is handled by the scan coordinator — no per-stick work item */
 
     LOG_INF("Analog stick initialized: has_y=%d, filter=%d, pulse=%d",
             cfg->has_y, cfg->has_filter, cfg->pulse_read);
@@ -630,7 +597,7 @@ static int analog_stick_pm_action(const struct device *dev,
 
     switch (action) {
     case PM_DEVICE_ACTION_SUSPEND:
-        k_work_cancel_delayable_sync(&data->poll_work, &data->work_sync);
+        /* Scan coordinator handles work cancellation */
         if (cfg->has_enable_gpio) {
             gpio_pin_set_dt(&cfg->enable_gpio, 0);
         }
@@ -652,8 +619,6 @@ static int analog_stick_pm_action(const struct device *dev,
         data->primed = false;
         data->prev_x = INT16_MIN;
         data->prev_y = INT16_MIN;
-        k_work_schedule_for_queue(&analog_stick_wq, &data->poll_work,
-                                  K_MSEC(cfg->wait_period_idle));
         return 0;
     }
     default:
@@ -684,9 +649,10 @@ static int analog_stick_pm_action(const struct device *dev,
     BUILD_ASSERT(IMPLIES(DT_INST_PROP(n, pulse_read),                          \
                          HAS_PROP(n, enable_gpios)),                           \
                  "pulse-read requires enable-gpios");                          \
-    BUILD_ASSERT(!HAS_PROP(n, filter_coefficients) ||                          \
-                 DT_INST_PROP_LEN(n, filter_coefficients) == 6,                \
-                 "filter-coefficients must have exactly 6 elements");          \
+    COND_CODE_1(HAS_PROP(n, filter_coefficients),                              \
+        (BUILD_ASSERT(DT_INST_PROP_LEN(n, filter_coefficients) == 6,           \
+                      "filter-coefficients must have exactly 6 elements")),    \
+        ());                                                                   \
     BUILD_ASSERT(DT_INST_PROP(n, wait_period_active) > 0,                      \
                  "wait-period-active must be positive");                       \
     BUILD_ASSERT(DT_INST_PROP(n, wait_period_idle) > 0,                        \
@@ -727,8 +693,7 @@ static int analog_stick_pm_action(const struct device *dev,
             ({0})),                                                            \
                                                                                \
         .deadzone = DT_INST_PROP(n, deadzone),                                 \
-        .switch_activation_point = DT_INST_PROP(n, switch_activation_point),   \
-        .switch_hysteresis = DT_INST_PROP(n, switch_hysteresis),               \
+        .inter_channel_settling_us = DT_INST_PROP(n, inter_channel_settling_time), \
                                                                                \
         .has_filter = HAS_PROP(n, filter_coefficients),                        \
         .filter_coeffs_raw = ANALOG_STICK_FILTER_COEFFS(n),                    \

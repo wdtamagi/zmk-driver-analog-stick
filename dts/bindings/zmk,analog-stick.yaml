@@ -1,7 +1,8 @@
 description: |
-  Multi-mode analog stick driver for ZMK. Reads hall-effect sensors via
-  Zephyr ADC io-channels and emits input events. Compatible with any
-  Zephyr ADC driver (MCP3208, nRF52840 SAADC, etc.).
+  Multi-mode analog stick driver for ZMK. Reads analog position sensors
+  (TMR, hall-effect, etc.) via Zephyr ADC io-channels and emits input
+  events. Compatible with any Zephyr ADC driver (MCP3208, nRF52840
+  SAADC, etc.).
 
 compatible: "zmk,analog-stick"
 
@@ -48,8 +49,9 @@ properties:
     type: int
     default: 50
     description: |
-      Deadzone radius in raw ADC units. For dual-axis, applies as a circular
-      deadzone (x^2 + y^2 < dz^2). For single-axis, linear threshold.
+      Per-axis linear deadzone in raw ADC units. Values within this
+      distance of center are treated as zero. Applied independently
+      to each axis in rescale_axis().
 
   invert-x:
     type: boolean
@@ -72,8 +74,9 @@ properties:
   enable-gpios:
     type: phandle-array
     description: |
-      GPIO for sensor power control. When specified, the driver manages
-      this GPIO to power sensors on/off.
+      GPIO for sensor power control. Sticks sharing the same GPIO are
+      grouped by the scan coordinator for a single settling wait per
+      group, reducing total scan time.
 
   pulse-read:
     type: boolean
@@ -83,30 +86,28 @@ properties:
 
   read-turn-on-time:
     type: int
-    default: 5000
+    default: 100
     description: |
       Sensor settling time in microseconds after asserting enable GPIO.
-      Hall sensors typically need 1-5ms to stabilize after power-on.
+      Default 100µs is appropriate for TMR sensors. Hall-effect users
+      should set 1000-5000µs per their sensor datasheet (e.g.
+      read-turn-on-time = <5000>).
 
-  switch-activation-point:
+  inter-channel-settling-time:
     type: int
     default: 40
     description: |
-      Threshold for switch mode activation in rescaled output units.
-      When the rescaled axis value exceeds this threshold, a key press
-      is generated. Range depends on output scaling (0-127 typical).
-
-  switch-hysteresis:
-    type: int
-    default: 0
-    description: |
-      Hysteresis band for switch mode in the same units as activation point.
-      Key release occurs when value drops below (activation - hysteresis).
-      Default 0 means 10% of activation point is used automatically.
+      Inter-channel settling time in microseconds between X and Y ADC reads.
+      nRF52840 SAADC requires 40µs minimum; MCP3208 needs only ~5µs.
+      Tune per hardware to minimize scan time without corrupting readings.
 
   filter-coefficients:
-    type: uint8-array
+    type: array
     description: |
-      IIR biquad filter coefficients as 6 IEEE-754 floats packed as
-      24 bytes (b0 b1 b2 a0 a1 a2). a0 must be 1.0 (normalized).
-      Omit to disable filtering.
+      IIR biquad filter coefficients as 6 raw IEEE-754 uint32 hex
+      representations (b0, b1, b2, a0, a1, a2). a0 must be 1.0
+      (normalized, hex 0x3F800000). Omit to disable filtering.
+      Example (2nd-order Butterworth LPF, 25Hz cutoff at 125Hz/8ms poll):
+        filter-coefficients = <0x3D8A3D71 0x3E0A3D71 0x3D8A3D71
+                                0x3F800000 0xBF927DBD 0x3ED32C9C>;
+      Coefficients must be recalculated for poll rates other than 8ms.

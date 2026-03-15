@@ -1,2 +1,5 @@
 build/
 .west/
+.omc/
+.claude/
+openspec/

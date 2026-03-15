@@ -5,19 +5,33 @@ config ZMK_ANALOG_STICK
 	select ADC
 	select GPIO
 	select INPUT
+	select ZMK_POINTING
 	help
-	  Multi-mode analog stick driver for ZMK. Reads hall-effect sensors
-	  via io-channels (MCP3208, nRF52840 SAADC, etc.) and emits Zephyr
-	  input events. Supports switch, mouse pointer, and scroll modes
-	  switchable per keymap layer.
+	  Multi-mode analog stick driver for ZMK. Reads analog position
+	  sensors (TMR, hall-effect, etc.) via io-channels (MCP3208,
+	  nRF52840 SAADC, etc.) and emits Zephyr input events. Supports
+	  switch, mouse pointer, and scroll modes switchable per keymap
+	  layer.
+
+config ZMK_ANALOG_STICK_STICK_COUNT
+	int "Maximum number of analog stick instances"
+	default 1
+	range 1 8
+	depends on ZMK_ANALOG_STICK
+	help
+	  Maximum number of analog stick instances supported. Used to
+	  size the scan coordinator's instance registry at compile time.
+	  Set to match the number of zmk,analog-stick nodes in your DTS.
 
 config ZMK_ANALOG_STICK_WORK_QUEUE_STACK_SIZE
 	int "Analog stick work queue stack size"
-	default 2048
+	default 2560
 	range 1024 8192
 	depends on ZMK_ANALOG_STICK
 	help
 	  Stack size for the dedicated analog stick work queue thread.
+	  Default 2560 is sufficient for TMR and hall-effect configurations
+	  with logging enabled, providing margin for ISR preemption.
 
 config ZMK_ANALOG_STICK_BLE_POLL_FLOOR
 	int "BLE poll floor (ms)"
@@ -27,7 +41,19 @@ config ZMK_ANALOG_STICK_BLE_POLL_FLOOR
 	help
 	  Minimum active poll interval when BLE is enabled. Polling faster
 	  than the BLE connection interval wastes power without improving
-	  responsiveness.
+	  responsiveness. The scan coordinator may raise this floor
+	  dynamically based on the negotiated BLE connection interval.
+
+config ZMK_ANALOG_STICK_CI_FLOOR_OVERRIDE
+	int "CI floor override (ms)"
+	default 0
+	range 0 1000
+	depends on ZMK_ANALOG_STICK
+	help
+	  When nonzero, overrides the BLE connection-interval-derived
+	  poll floor with this fixed value. Useful for testing or forcing
+	  a specific poll rate regardless of the negotiated CI.
+	  Set to 0 (default) to use dynamic CI tracking.
 
 config ZMK_ANALOG_STICK_INIT_PRIORITY
 	int "Analog stick init priority"
@@ -36,6 +62,40 @@ config ZMK_ANALOG_STICK_INIT_PRIORITY
 	help
 	  Initialization priority for analog stick devices. Must be after
 	  ADC and GPIO device init (POST_KERNEL).
+
+config ZMK_ANALOG_STICK_SPLIT_PACKED
+	bool "Packed split transport for analog sticks"
+	default n
+	depends on ZMK_ANALOG_STICK && ZMK_SPLIT
+	help
+	  Coalesce all stick axis changes into one BLE notification per
+	  scan cycle. Reduces 16 notifications to 1 for 8-stick configs.
+	  Both peripheral and central must run compatible module versions.
+	  Enable this for 5+ stick configurations. Legacy per-event
+	  transport remains available when disabled.
+
+config ZMK_ANALOG_STICK_HID_FLUSH_PER_STICK
+	bool "Flush HID report after each stick (no coordinator)"
+	default y if !ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL
+	default n
+	depends on ZMK_ANALOG_STICK
+	help
+	  When enabled, the input listener flushes the HID accumulator
+	  immediately after each stick's mouse/scroll contribution.
+	  Enable this for central-side or non-split configurations where
+	  the scan coordinator is not calling flush. On peripheral side
+	  with scan coordinator, leave disabled (coordinator flushes).
+
+config ZMK_ANALOG_STICK_REQUEST_DLE
+	bool "Request BLE Data Length Extension"
+	default y if ZMK_ANALOG_STICK_SPLIT_PACKED
+	default n
+	depends on ZMK_ANALOG_STICK && ZMK_BLE
+	help
+	  Request Data Length Extension on BLE connections. DLE increases
+	  the ATT MTU payload to 27 bytes, allowing the packed transport
+	  format (26 bytes max for 8 sticks) to fit in a single PDU.
+	  Without DLE, the packed payload may require fragmentation.
 
 module = ZMK_ANALOG_STICK
 module-str = zmk_analog_stick

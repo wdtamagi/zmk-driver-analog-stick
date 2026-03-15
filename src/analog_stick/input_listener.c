@@ -21,19 +21,10 @@
 
 #include <dt-bindings/analog-stick/modes.h>
 
+#include <analog-stick/q16.h>
+#include <analog-stick/hid_accumulator.h>
+
 LOG_MODULE_REGISTER(zmk_analog_stick_listener, CONFIG_ZMK_ANALOG_STICK_LOG_LEVEL);
-
-/* -------------------------------------------------------------------------- */
-/* Q16.16 helpers (lightweight subset for listener math)                      */
-/* -------------------------------------------------------------------------- */
-
-typedef int32_t q16_t;
-#define Q16_SHIFT 16
-#define Q16_ONE   ((q16_t)(1U << Q16_SHIFT))
-
-static inline q16_t q16_mul_l(q16_t a, q16_t b) {
-    return (q16_t)(((int64_t)a * b) >> Q16_SHIFT);
-}
 
 /* -------------------------------------------------------------------------- */
 /* Per-layer configuration (from devicetree child nodes)                      */
@@ -48,6 +39,8 @@ struct layer_config {
     uint32_t down_keycode;
     uint32_t left_keycode;
     uint32_t right_keycode;
+    int32_t switch_activation_point;
+    int32_t switch_hysteresis;
 
     /* Mouse mode */
     int32_t mouse_min_speed;
@@ -143,7 +136,7 @@ static void release_all_keys(struct listener_data *data,
         zmk_hid_keyboard_release(old_cfg->right_keycode);
     }
     if (data->pressed_dirs != 0) {
-        zmk_endpoints_send_report(HID_USAGE_KEY);
+        zmk_endpoint_send_report(HID_USAGE_KEY);
         data->pressed_dirs = 0;
     }
 }
@@ -239,7 +232,7 @@ static void process_switch_mode(struct listener_data *data,
     }
 
     if (changed) {
-        zmk_endpoints_send_report(HID_USAGE_KEY);
+        zmk_endpoint_send_report(HID_USAGE_KEY);
     }
 
     data->pressed_dirs = new_dirs;
@@ -275,23 +268,24 @@ static void process_mouse_mode(struct listener_data *data,
     /* Linear speed ramp: min_speed at mag=1, max_speed at mag=127 */
     int32_t min_spd = lcfg->mouse_min_speed;
     int32_t max_spd = lcfg->mouse_max_speed;
-    /* speed in Q16.16 */
+    /* speed in Q16.16 — cast to uint32_t before shifting to avoid
+     * signed left-shift UB when value >= 32768 */
     q16_t speed;
     if (mag <= 1) {
-        speed = min_spd << Q16_SHIFT;
+        speed = (q16_t)((uint32_t)min_spd << Q16_SHIFT);
     } else {
         /* Linear interpolation */
-        speed = (min_spd << Q16_SHIFT) +
+        speed = (q16_t)((uint32_t)min_spd << Q16_SHIFT) +
                 (q16_t)(((int64_t)(max_spd - min_spd) * (mag - 1) << Q16_SHIFT) / 126);
     }
 
     /* Decompose into X/Y components preserving angle */
-    q16_t dx = q16_mul_l(speed, (q16_t)((int32_t)x << Q16_SHIFT) / (mag > 0 ? mag : 1));
-    q16_t dy = q16_mul_l(speed, (q16_t)((int32_t)y << Q16_SHIFT) / (mag > 0 ? mag : 1));
+    q16_t dx = q16_mul(speed, (q16_t)((int32_t)x << Q16_SHIFT) / (mag > 0 ? mag : 1));
+    q16_t dy = q16_mul(speed, (q16_t)((int32_t)y << Q16_SHIFT) / (mag > 0 ? mag : 1));
 
-    /* Accumulate sub-pixel fractions */
-    data->mouse_acc_x += dx;
-    data->mouse_acc_y += dy;
+    /* Accumulate sub-pixel fractions (saturating to prevent overflow) */
+    data->mouse_acc_x = q16_sat_add(data->mouse_acc_x, dx);
+    data->mouse_acc_y = q16_sat_add(data->mouse_acc_y, dy);
 
     /* Extract integer pixels */
     int16_t px = (int16_t)(data->mouse_acc_x >> Q16_SHIFT);
@@ -302,9 +296,10 @@ static void process_mouse_mode(struct listener_data *data,
     data->mouse_acc_y -= (q16_t)py << Q16_SHIFT;
 
     if (px != 0 || py != 0) {
-        zmk_hid_mouse_movement_set(px, py);
-        zmk_endpoints_send_mouse_report();
-        zmk_hid_mouse_movement_set(0, 0);
+        zmk_analog_stick_hid_move_add(px, py);
+#if IS_ENABLED(CONFIG_ZMK_ANALOG_STICK_HID_FLUSH_PER_STICK)
+        zmk_analog_stick_hid_flush();
+#endif
     }
 }
 
@@ -345,9 +340,10 @@ static void process_scroll_mode(struct listener_data *data,
     data->scroll_acc_y -= (q16_t)sy << Q16_SHIFT;
 
     if (sx != 0 || sy != 0) {
-        zmk_hid_mouse_scroll_set(sx, sy);
-        zmk_endpoints_send_mouse_report();
-        zmk_hid_mouse_scroll_set(0, 0);
+        zmk_analog_stick_hid_scroll_add(sx, sy);
+#if IS_ENABLED(CONFIG_ZMK_ANALOG_STICK_HID_FLUSH_PER_STICK)
+        zmk_analog_stick_hid_flush();
+#endif
     }
 }
 
@@ -394,19 +390,11 @@ static void input_handler(const struct listener_config *config,
 
     /* Dispatch to mode handler */
     switch (data->current_mode) {
-    case ANALOG_STICK_MODE_SWITCH: {
-        /* Get activation point and hysteresis from the analog stick device
-         * config. For now, use reasonable defaults that can be overridden.
-         * The activation point is in the output range [0, 127]. */
-        int32_t activation = 40; /* default */
-        int32_t hysteresis = 4;  /* default 10% of activation */
-
-        /* Try to read from the source device's config if accessible.
-         * The analog stick stores these in its config struct. We read
-         * the devicetree properties directly at compile time instead. */
-        process_switch_mode(data, config, new_cfg, activation, hysteresis);
+    case ANALOG_STICK_MODE_SWITCH:
+        process_switch_mode(data, config, new_cfg,
+                            new_cfg->switch_activation_point,
+                            new_cfg->switch_hysteresis);
         break;
-    }
     case ANALOG_STICK_MODE_MOUSE:
         process_mouse_mode(data, new_cfg);
         break;
@@ -434,6 +422,8 @@ static void input_handler(const struct listener_config *config,
         .down_keycode = DT_PROP(node, down_keycode),                           \
         .left_keycode = DT_PROP(node, left_keycode),                           \
         .right_keycode = DT_PROP(node, right_keycode),                         \
+        .switch_activation_point = DT_PROP(node, switch_activation_point),   \
+        .switch_hysteresis = DT_PROP(node, switch_hysteresis),               \
         .mouse_min_speed = DT_PROP(node, mouse_min_speed),                     \
         .mouse_max_speed = DT_PROP(node, mouse_max_speed),                     \
         .scroll_divisor = DT_PROP(node, scroll_divisor),                       \
@@ -441,7 +431,14 @@ static void input_handler(const struct listener_config *config,
 
 #define IL_ONE(...) +1
 
+#define CHILD_LAYER_VALIDATE(node)                                             \
+    BUILD_ASSERT(DT_PROP(node, mouse_min_speed) <= 32767,                      \
+                 "mouse-min-speed must be <= 32767 to avoid Q16 overflow");    \
+    BUILD_ASSERT(DT_PROP(node, mouse_max_speed) <= 32767,                      \
+                 "mouse-max-speed must be <= 32767 to avoid Q16 overflow");
+
 #define LISTENER_INST(n)                                                       \
+    DT_INST_FOREACH_CHILD(n, CHILD_LAYER_VALIDATE)                                                       \
     static const struct layer_config layer_configs_##n[] = {                    \
         DT_INST_FOREACH_CHILD(n, CHILD_LAYER_CONFIG)                           \
     };                                                                         \
@@ -453,10 +450,11 @@ static void input_handler(const struct listener_config *config,
                                                                                \
     static struct listener_data listener_data_##n = {};                        \
                                                                                \
-    static void analog_stick_input_handler_##n(struct input_event *evt) {      \
+    static void analog_stick_input_handler_##n(struct input_event *evt,        \
+                                               void *user_data) {             \
         input_handler(&listener_config_##n, &listener_data_##n, evt);          \
     }                                                                          \
     INPUT_CALLBACK_DEFINE(DEVICE_DT_GET(DT_INST_PHANDLE(n, device)),           \
-                          analog_stick_input_handler_##n);
+                          analog_stick_input_handler_##n, NULL);
 
 DT_INST_FOREACH_STATUS_OKAY(LISTENER_INST)
