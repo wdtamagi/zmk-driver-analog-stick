@@ -55,6 +55,18 @@ config ZMK_ANALOG_STICK_CI_FLOOR_OVERRIDE
 	  a specific poll rate regardless of the negotiated CI.
 	  Set to 0 (default) to use dynamic CI tracking.
 
+config ZMK_ANALOG_STICK_ACTIVE_COOLDOWN_MS
+	int "Active poll cooldown (ms)"
+	default 250
+	range 0 5000
+	depends on ZMK_ANALOG_STICK
+	help
+	  After the stick returns to center, keep polling at the active
+	  rate for this many milliseconds before dropping to idle. This
+	  ensures rapid successive flicks (e.g. double-tap a direction)
+	  are not missed due to the slow idle poll interval.
+	  Set to 0 to disable (immediately return to idle polling).
+
 config ZMK_ANALOG_STICK_INIT_PRIORITY
 	int "Analog stick init priority"
 	default 90

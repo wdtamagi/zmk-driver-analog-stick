@@ -156,6 +156,13 @@ static struct bt_conn_cb scan_conn_callbacks = {
 static bool group_pulse_suppressed[MAX_GROUPS];
 
 /* -------------------------------------------------------------------------- */
+/* Active cooldown: stay at fast poll rate briefly after stick returns to      */
+/* center, so rapid successive flicks are not missed.                         */
+/* -------------------------------------------------------------------------- */
+
+static int64_t last_active_time;  /* k_uptime_get() of last deflected poll */
+
+/* -------------------------------------------------------------------------- */
 /* Scan work handler                                                          */
 /* -------------------------------------------------------------------------- */
 
@@ -217,7 +224,32 @@ static void scan_coordinator_work_handler(struct k_work *work) {
         }
     }
 
-    int32_t selected_rate_ms = any_active ? min_active_ms : max_idle_ms;
+    /* Active cooldown: keep fast poll rate briefly after stick returns to
+     * center so rapid successive flicks (double-tap) are not missed. */
+    int64_t now = k_uptime_get();
+    bool in_cooldown = false;
+
+    if (any_active) {
+        last_active_time = now;
+    } else if (CONFIG_ZMK_ANALOG_STICK_ACTIVE_COOLDOWN_MS > 0 &&
+               last_active_time > 0 &&
+               (now - last_active_time) < CONFIG_ZMK_ANALOG_STICK_ACTIVE_COOLDOWN_MS) {
+        in_cooldown = true;
+    }
+
+    int32_t selected_rate_ms = (any_active || in_cooldown) ? min_active_ms : max_idle_ms;
+    /* If only in cooldown (no stick currently active), min_active_ms is still
+     * INT32_MAX — fall back to the fastest configured active rate. */
+    if (in_cooldown && !any_active) {
+        /* Use the smallest active period across all sticks */
+        selected_rate_ms = INT32_MAX;
+        for (size_t i = 0; i < stick_count; i++) {
+            int32_t ap = analog_stick_get_wait_period_active(stick_registry[i].dev);
+            if (ap < selected_rate_ms) {
+                selected_rate_ms = ap;
+            }
+        }
+    }
 
     /* Pulse-read suppression: auto-disable when settling > half poll period */
     for (size_t g = 0; g < group_count; g++) {
@@ -236,7 +268,7 @@ static void scan_coordinator_work_handler(struct k_work *work) {
                 gpio_pin_set_dt(grp->gpio, 1);
                 group_pulse_suppressed[g] = true;
             }
-        } else if (group_pulse_suppressed[g] && !any_active) {
+        } else if (group_pulse_suppressed[g] && !any_active && !in_cooldown) {
             LOG_INF("pulse-read re-enabled for group %zu: "
                     "returning to idle poll rate", g);
             gpio_pin_set_dt(grp->gpio, 0);
