@@ -309,6 +309,7 @@ int analog_stick_read_adc(const struct device *dev) {
         LOG_DBG("X-axis at rail (%d)", adc_x);
         adc_x = data->effective_x.center;
     }
+    LOG_DBG("raw X=%d", adc_x);
     data->raw_x = q16_from_int(adc_x);
 
     if (cfg->has_y) {
@@ -328,6 +329,7 @@ int analog_stick_read_adc(const struct device *dev) {
             LOG_DBG("Y-axis at rail (%d)", adc_y);
             adc_y = data->effective_y.center;
         }
+        LOG_DBG("raw Y=%d", adc_y);
         data->raw_y = q16_from_int(adc_y);
     }
 
