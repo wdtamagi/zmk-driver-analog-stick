@@ -276,7 +276,7 @@ static void scan_coordinator_work_handler(struct k_work *work) {
     if (stick_count < MAX_STICKS) {                                            \
         const struct device *dev = DEVICE_DT_GET(n);                          \
         if (!device_is_ready(dev)) {                                           \
-            LOG_ERR("analog stick device not ready, skipping");                \
+            LOG_ERR("[%s] analog stick device not ready, skipping", dev->name);                \
         } else {                                                               \
             stick_registry[stick_count].dev = dev;                             \
             stick_registry[stick_count].enable_gpio =                          \

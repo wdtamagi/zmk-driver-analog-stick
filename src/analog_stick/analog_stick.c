@@ -299,17 +299,17 @@ int analog_stick_read_adc(const struct device *dev) {
 
     int err = adc_read(cfg->x.adc.dev, &data->seq_x);
     if (err) {
-        LOG_ERR("X-axis ADC read failed: %d", err);
+        LOG_ERR("[%s] X-axis ADC read failed: %d", dev->name, err);
         data->read_err = err;
         return err;
     }
 
     int32_t adc_x = data->adc_buf[0];
     if (adc_at_rail(adc_x, cfg->x.adc.resolution, cfg->x.adc.oversampling)) {
-        LOG_DBG("X-axis at rail (%d)", adc_x);
+        LOG_DBG("[%s] X-axis at rail (%d)", dev->name, adc_x);
         adc_x = data->effective_x.center;
     }
-    LOG_DBG("raw X=%d", adc_x);
+    LOG_DBG("[%s] raw X=%d", dev->name, adc_x);
     data->raw_x = q16_from_int(adc_x);
 
     if (cfg->has_y) {
@@ -320,16 +320,16 @@ int analog_stick_read_adc(const struct device *dev) {
         }
         err = adc_read(cfg->y.adc.dev, &data->seq_y);
         if (err) {
-            LOG_ERR("Y-axis ADC read failed: %d", err);
+            LOG_ERR("[%s] Y-axis ADC read failed: %d", dev->name, err);
             data->read_err = err;
             return err;
         }
         int32_t adc_y = data->adc_buf[1];
         if (adc_at_rail(adc_y, cfg->y.adc.resolution, cfg->y.adc.oversampling)) {
-            LOG_DBG("Y-axis at rail (%d)", adc_y);
+            LOG_DBG("[%s] Y-axis at rail (%d)", dev->name, adc_y);
             adc_y = data->effective_y.center;
         }
-        LOG_DBG("raw Y=%d", adc_y);
+        LOG_DBG("[%s] raw Y=%d", dev->name, adc_y);
         data->raw_y = q16_from_int(adc_y);
     }
 
@@ -411,11 +411,12 @@ static inline bool float_is_finite_raw(uint32_t raw) {
     return ((raw >> 23) & 0xFF) != 0xFF;
 }
 
-static int setup_adc(struct analog_stick_data *data,
+static int setup_adc(const struct device *dev,
+                     struct analog_stick_data *data,
                      const struct analog_stick_config *cfg) {
     int err = adc_channel_setup_dt(&cfg->x.adc);
     if (err) {
-        LOG_ERR("X-axis ADC channel setup failed: %d", err);
+        LOG_ERR("[%s] X-axis ADC channel setup failed: %d", dev->name, err);
         return err;
     }
     adc_sequence_init_dt(&cfg->x.adc, &data->seq_x);
@@ -425,7 +426,7 @@ static int setup_adc(struct analog_stick_data *data,
     if (cfg->has_y) {
         err = adc_channel_setup_dt(&cfg->y.adc);
         if (err) {
-            LOG_ERR("Y-axis ADC channel setup failed: %d", err);
+            LOG_ERR("[%s] Y-axis ADC channel setup failed: %d", dev->name, err);
             return err;
         }
         adc_sequence_init_dt(&cfg->y.adc, &data->seq_y);
@@ -436,7 +437,8 @@ static int setup_adc(struct analog_stick_data *data,
     return 0;
 }
 
-static int parse_filter_coeffs(struct analog_stick_data *data,
+static int parse_filter_coeffs(const struct device *dev,
+                               struct analog_stick_data *data,
                                const struct analog_stick_config *cfg) {
     if (!cfg->has_filter) {
         return 0;
@@ -448,17 +450,17 @@ static int parse_filter_coeffs(struct analog_stick_data *data,
     }
 
     if (absf(f[3] - 1.0f) > 1e-6f) {
-        LOG_ERR("Filter a0 must be 1.0 (normalized)");
+        LOG_ERR("[%s] Filter a0 must be 1.0 (normalized)", dev->name);
         return -EINVAL;
     }
 
     for (int i = 0; i < 6; i++) {
         if (!float_is_finite_raw(cfg->filter_coeffs_raw[i])) {
-            LOG_ERR("Filter coefficient [%d] is NaN or Inf", i);
+            LOG_ERR("[%s] Filter coefficient [%d] is NaN or Inf", dev->name, i);
             return -EINVAL;
         }
         if (absf(f[i]) > 32767.0f) {
-            LOG_ERR("Filter coefficient [%d] out of Q16.16 range", i);
+            LOG_ERR("[%s] Filter coefficient [%d] out of Q16.16 range", dev->name, i);
             return -EINVAL;
         }
     }
@@ -467,7 +469,7 @@ static int parse_filter_coeffs(struct analog_stick_data *data,
     if (absf(f[5]) >= 1.0f ||
         (1.0f + f[4] + f[5]) <= 0.0f ||
         (1.0f - f[4] + f[5]) <= 0.0f) {
-        LOG_ERR("Filter coefficients are unstable");
+        LOG_ERR("[%s] Filter coefficients are unstable", dev->name);
         return -EINVAL;
     }
 
@@ -503,33 +505,33 @@ static int analog_stick_init(const struct device *dev) {
 
     /* Validate DT calibration (sanity check regardless of auto-center) */
     if (cfg->x.min >= cfg->x.center || cfg->x.center >= cfg->x.max) {
-        LOG_ERR("Invalid X calibration: min=%d center=%d max=%d",
-                cfg->x.min, cfg->x.center, cfg->x.max);
+        LOG_ERR("[%s] Invalid X calibration: min=%d center=%d max=%d",
+                dev->name, cfg->x.min, cfg->x.center, cfg->x.max);
         return -EINVAL;
     }
     if (cfg->has_y &&
         (cfg->y.min >= cfg->y.center || cfg->y.center >= cfg->y.max)) {
-        LOG_ERR("Invalid Y calibration: min=%d center=%d max=%d",
-                cfg->y.min, cfg->y.center, cfg->y.max);
+        LOG_ERR("[%s] Invalid Y calibration: min=%d center=%d max=%d",
+                dev->name, cfg->y.min, cfg->y.center, cfg->y.max);
         return -EINVAL;
     }
     if (cfg->has_deadzone_percent) {
         if (cfg->deadzone_percent < 1 || cfg->deadzone_percent > 99) {
-            LOG_ERR("deadzone-percent %d out of range [1, 99]",
-                    cfg->deadzone_percent);
+            LOG_ERR("[%s] deadzone-percent %d out of range [1, 99]",
+                    dev->name, cfg->deadzone_percent);
             return -EINVAL;
         }
         if (cfg->deadzone != 50) {
-            LOG_WRN("Both deadzone and deadzone-percent specified; "
-                    "deadzone-percent takes precedence");
+            LOG_WRN("[%s] Both deadzone and deadzone-percent specified; "
+                    "deadzone-percent takes precedence", dev->name);
         }
     }
     if (cfg->read_turn_on_time < 0 || cfg->read_turn_on_time > MAX_TURN_ON_TIME_US) {
-        LOG_ERR("read-turn-on-time %d out of range", cfg->read_turn_on_time);
+        LOG_ERR("[%s] read-turn-on-time %d out of range", dev->name, cfg->read_turn_on_time);
         return -EINVAL;
     }
     if (cfg->wait_period_idle <= 0 || cfg->wait_period_active <= 0) {
-        LOG_ERR("wait periods must be > 0");
+        LOG_ERR("[%s] wait periods must be > 0", dev->name);
         return -EINVAL;
     }
 
@@ -538,7 +540,7 @@ static int analog_stick_init(const struct device *dev) {
     /* GPIO setup */
     if (cfg->has_enable_gpio) {
         if (!gpio_is_ready_dt(&cfg->enable_gpio)) {
-            LOG_ERR("Enable GPIO not ready");
+            LOG_ERR("[%s] Enable GPIO not ready", dev->name);
             return -ENODEV;
         }
         int initial = cfg->pulse_read ? 0 : 1;
@@ -546,7 +548,7 @@ static int analog_stick_init(const struct device *dev) {
                                         GPIO_OUTPUT | (initial ? GPIO_OUTPUT_INIT_HIGH
                                                                : GPIO_OUTPUT_INIT_LOW));
         if (err) {
-            LOG_ERR("GPIO configure failed: %d", err);
+            LOG_ERR("[%s] GPIO configure failed: %d", dev->name, err);
             return err;
         }
         if (!cfg->pulse_read) {
@@ -560,14 +562,14 @@ static int analog_stick_init(const struct device *dev) {
 
     /* ADC setup */
     if (!adc_is_ready_dt(&cfg->x.adc)) {
-        LOG_ERR("X-axis ADC not ready");
+        LOG_ERR("[%s] X-axis ADC not ready", dev->name);
         return -ENODEV;
     }
     if (cfg->has_y && !adc_is_ready_dt(&cfg->y.adc)) {
-        LOG_ERR("Y-axis ADC not ready");
+        LOG_ERR("[%s] Y-axis ADC not ready", dev->name);
         return -ENODEV;
     }
-    int err = setup_adc(data, cfg);
+    int err = setup_adc(dev, data, cfg);
     if (err) {
         return err;
     }
@@ -585,7 +587,7 @@ static int analog_stick_init(const struct device *dev) {
         for (int i = 0; i < CONFIG_ZMK_ANALOG_STICK_AUTO_CENTER_SAMPLES; i++) {
             int ac_err = adc_read(cfg->x.adc.dev, &data->seq_x);
             if (ac_err) {
-                LOG_ERR("Auto-center X read %d failed: %d", i, ac_err);
+                LOG_ERR("[%s] Auto-center X read %d failed: %d", dev->name, i, ac_err);
                 return ac_err;
             }
             sum_x += data->adc_buf[0];
@@ -597,18 +599,18 @@ static int analog_stick_init(const struct device *dev) {
                 }
                 ac_err = adc_read(cfg->y.adc.dev, &data->seq_y);
                 if (ac_err) {
-                    LOG_ERR("Auto-center Y read %d failed: %d", i, ac_err);
+                    LOG_ERR("[%s] Auto-center Y read %d failed: %d", dev->name, i, ac_err);
                     return ac_err;
                 }
                 sum_y += data->adc_buf[1];
             }
         }
         data->effective_x.center = sum_x / CONFIG_ZMK_ANALOG_STICK_AUTO_CENTER_SAMPLES;
-        LOG_INF("Auto-center X: DT=%d measured=%d", cfg->x.center,
+        LOG_INF("[%s] Auto-center X: DT=%d measured=%d", dev->name, cfg->x.center,
                 data->effective_x.center);
         if (cfg->has_y) {
             data->effective_y.center = sum_y / CONFIG_ZMK_ANALOG_STICK_AUTO_CENTER_SAMPLES;
-            LOG_INF("Auto-center Y: DT=%d measured=%d", cfg->y.center,
+            LOG_INF("[%s] Auto-center Y: DT=%d measured=%d", dev->name, cfg->y.center,
                     data->effective_y.center);
         }
     }
@@ -625,23 +627,23 @@ static int analog_stick_init(const struct device *dev) {
 
     /* Validate effective deadzone */
     if (data->effective_deadzone < 0) {
-        LOG_ERR("effective deadzone must be non-negative");
+        LOG_ERR("[%s] effective deadzone must be non-negative", dev->name);
         return -EINVAL;
     }
     if (data->effective_deadzone >= (data->effective_x.center - data->effective_x.min) ||
         data->effective_deadzone >= (data->effective_x.max - data->effective_x.center)) {
-        LOG_ERR("effective deadzone exceeds X axis range");
+        LOG_ERR("[%s] effective deadzone exceeds X axis range", dev->name);
         return -EINVAL;
     }
     if (cfg->has_y &&
         (data->effective_deadzone >= (data->effective_y.center - data->effective_y.min) ||
          data->effective_deadzone >= (data->effective_y.max - data->effective_y.center))) {
-        LOG_ERR("effective deadzone exceeds Y axis range");
+        LOG_ERR("[%s] effective deadzone exceeds Y axis range", dev->name);
         return -EINVAL;
     }
 
     /* Filter setup */
-    err = parse_filter_coeffs(data, cfg);
+    err = parse_filter_coeffs(dev, data, cfg);
     if (err) {
         return err;
     }
@@ -650,7 +652,7 @@ static int analog_stick_init(const struct device *dev) {
     if (cfg->has_filter) {
         uint8_t res = cfg->x.adc.resolution;
         if (res < 1 || res > 16) {
-            LOG_ERR("ADC resolution %d out of range [1, 16]", res);
+            LOG_ERR("[%s] ADC resolution %d out of range [1, 16]", dev->name, res);
             return -EINVAL;
         }
         int32_t full_scale = (int32_t)((1U << res) - 1U);
@@ -668,8 +670,8 @@ static int analog_stick_init(const struct device *dev) {
 
     /* Polling is handled by the scan coordinator — no per-stick work item */
 
-    LOG_INF("Analog stick initialized: has_y=%d, filter=%d, pulse=%d",
-            cfg->has_y, cfg->has_filter, cfg->pulse_read);
+    LOG_INF("[%s] initialized: has_y=%d, filter=%d, pulse=%d",
+            dev->name, cfg->has_y, cfg->has_filter, cfg->pulse_read);
 
     return 0;
 }
@@ -692,9 +694,9 @@ static int analog_stick_pm_action(const struct device *dev,
         }
         return 0;
     case PM_DEVICE_ACTION_RESUME: {
-        int err = setup_adc(data, cfg);
+        int err = setup_adc(dev, data, cfg);
         if (err) {
-            LOG_ERR("ADC re-setup after resume failed: %d", err);
+            LOG_ERR("[%s] ADC re-setup after resume failed: %d", dev->name, err);
             return err;
         }
         if (cfg->has_enable_gpio && !cfg->pulse_read) {
