@@ -271,30 +271,21 @@ static q16_t rescale_axis(q16_t adc_val, const struct axis_config *ax,
 /* -------------------------------------------------------------------------- */
 
 /**
- * Sign-extend a raw ADC buffer value from its native resolution to int32_t,
- * then clamp negative values to 0.  The nRF SAADC is inherently signed; in
- * single-ended mode a near-GND input can produce small negative results that
- * land in the int32_t buffer without sign extension (e.g. -1 → 0x0000FFFF).
+ * Extract the low N bits of a raw ADC buffer value and clamp negative readings
+ * to 0.  The nRF SAADC is inherently signed; in single-ended mode a near-GND
+ * input can produce small negative results that land in the int32_t buffer
+ * without sign extension (e.g. -1 → 0x0000FFFF).  We detect the ADC sign bit
+ * and clamp to 0 — no shift-based sign extension needed, avoiding UB in C99.
  */
 static inline int32_t adc_sanitize(int32_t raw, uint8_t resolution) {
-    int32_t shift = 32 - resolution;
-    int32_t sign_extended = (raw << shift) >> shift; /* arithmetic right shift */
-    return (sign_extended < 0) ? 0 : sign_extended;
-}
-
-/* Rail detection                                                             */
-/* -------------------------------------------------------------------------- */
-
-#define ADC_RAIL_MARGIN 15 /* noise margin: 15 LSB avoids false rail on noisy PCBs */
-
-static bool adc_at_rail(int32_t value, uint8_t resolution, uint8_t oversampling) {
     if (resolution == 0 || resolution > 16) {
-        return false;
+        return 0;
     }
-    int32_t norm = (oversampling > 0) ? (value >> oversampling) : value;
-    int32_t full_scale = (int32_t)((1U << resolution) - 1);
-    int32_t margin = ADC_RAIL_MARGIN;
-    return norm > (full_scale - margin);
+    int32_t value = raw & ((1 << resolution) - 1); /* extract low N bits */
+    if (value & (1 << (resolution - 1))) {          /* ADC sign bit set → negative */
+        return 0;
+    }
+    return value;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -317,10 +308,6 @@ int analog_stick_read_adc(const struct device *dev) {
     }
 
     int32_t adc_x = adc_sanitize(data->adc_buf[0], cfg->x.adc.resolution);
-    if (adc_at_rail(adc_x, cfg->x.adc.resolution, cfg->x.adc.oversampling)) {
-        LOG_DBG("[%s] X-axis at rail (%d)", dev->name, adc_x);
-        adc_x = data->effective_x.center;
-    }
     LOG_DBG("[%s] raw X=%d", dev->name, adc_x);
     data->raw_x = q16_from_int(adc_x);
 
@@ -337,10 +324,6 @@ int analog_stick_read_adc(const struct device *dev) {
             return err;
         }
         int32_t adc_y = adc_sanitize(data->adc_buf[1], cfg->y.adc.resolution);
-        if (adc_at_rail(adc_y, cfg->y.adc.resolution, cfg->y.adc.oversampling)) {
-            LOG_DBG("[%s] Y-axis at rail (%d)", dev->name, adc_y);
-            adc_y = data->effective_y.center;
-        }
         LOG_DBG("[%s] raw Y=%d", dev->name, adc_y);
         data->raw_y = q16_from_int(adc_y);
     }
