@@ -63,6 +63,26 @@ config ZMK_ANALOG_STICK_INIT_PRIORITY
 	  Initialization priority for analog stick devices. Must be after
 	  ADC and GPIO device init (POST_KERNEL).
 
+config ZMK_ANALOG_STICK_AUTO_CENTER
+	bool "Auto-center calibration at boot"
+	default n
+	depends on ZMK_ANALOG_STICK
+	help
+	  Sample the ADC at boot (while the stick is at rest) and use the
+	  average as the center point, overriding the devicetree x-center /
+	  y-center values. The stick must be centered when the keyboard
+	  powers on.
+
+config ZMK_ANALOG_STICK_AUTO_CENTER_SAMPLES
+	int "Number of samples for auto-center averaging"
+	default 16
+	range 4 256
+	depends on ZMK_ANALOG_STICK_AUTO_CENTER
+	help
+	  Number of ADC samples to average when measuring the center point
+	  at boot. More samples reduce noise but increase init time.
+	  16 samples at ~40us each adds ~640us to boot.
+
 config ZMK_ANALOG_STICK_HID_FLUSH_PER_STICK
 	bool "Flush HID report after each stick (no coordinator)"
 	default y if !ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL

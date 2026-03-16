@@ -188,6 +188,10 @@ struct analog_stick_data {
     bool active;
     bool primed;
 
+    /* Runtime axis configs (copied from cfg at init; center may be overridden by auto-center) */
+    struct axis_config effective_x;
+    struct axis_config effective_y;
+
     int32_t effective_deadzone; /* computed at init; used by rescale pipeline */
 };
 
@@ -303,7 +307,7 @@ int analog_stick_read_adc(const struct device *dev) {
     int32_t adc_x = data->adc_buf[0];
     if (adc_at_rail(adc_x, cfg->x.adc.resolution, cfg->x.adc.oversampling)) {
         LOG_DBG("X-axis at rail (%d)", adc_x);
-        adc_x = cfg->x.center;
+        adc_x = data->effective_x.center;
     }
     data->raw_x = q16_from_int(adc_x);
 
@@ -322,7 +326,7 @@ int analog_stick_read_adc(const struct device *dev) {
         int32_t adc_y = data->adc_buf[1];
         if (adc_at_rail(adc_y, cfg->y.adc.resolution, cfg->y.adc.oversampling)) {
             LOG_DBG("Y-axis at rail (%d)", adc_y);
-            adc_y = cfg->y.center;
+            adc_y = data->effective_y.center;
         }
         data->raw_y = q16_from_int(adc_y);
     }
@@ -364,10 +368,10 @@ void analog_stick_process_and_emit(const struct device *dev) {
         }
     }
     /* --- Rescale --- */
-    q16_t scaled_x = rescale_axis(raw_x, &cfg->x, data->effective_deadzone,
+    q16_t scaled_x = rescale_axis(raw_x, &data->effective_x, data->effective_deadzone,
                                   data->inv_range_neg_x, data->inv_range_pos_x);
     q16_t scaled_y = cfg->has_y
-        ? rescale_axis(raw_y, &cfg->y, data->effective_deadzone,
+        ? rescale_axis(raw_y, &data->effective_y, data->effective_deadzone,
                        data->inv_range_neg_y, data->inv_range_pos_y)
         : 0;
 
@@ -495,7 +499,7 @@ static int analog_stick_init(const struct device *dev) {
 
     data->dev = dev;
 
-    /* Validate calibration */
+    /* Validate DT calibration (sanity check regardless of auto-center) */
     if (cfg->x.min >= cfg->x.center || cfg->x.center >= cfg->x.max) {
         LOG_ERR("Invalid X calibration: min=%d center=%d max=%d",
                 cfg->x.min, cfg->x.center, cfg->x.max);
@@ -507,40 +511,16 @@ static int analog_stick_init(const struct device *dev) {
                 cfg->y.min, cfg->y.center, cfg->y.max);
         return -EINVAL;
     }
-    /* Determine effective deadzone (precedence: deadzone-percent > deadzone) */
     if (cfg->has_deadzone_percent) {
         if (cfg->deadzone_percent < 1 || cfg->deadzone_percent > 99) {
             LOG_ERR("deadzone-percent %d out of range [1, 99]",
                     cfg->deadzone_percent);
             return -EINVAL;
         }
-        /* Warn if both properties were explicitly set in DT */
         if (cfg->deadzone != 50) {
             LOG_WRN("Both deadzone and deadzone-percent specified; "
                     "deadzone-percent takes precedence");
         }
-        int32_t half_range = MIN(cfg->x.center - cfg->x.min,
-                                 cfg->x.max - cfg->x.center);
-        data->effective_deadzone = (half_range * cfg->deadzone_percent) / 100;
-    } else {
-        data->effective_deadzone = cfg->deadzone;
-    }
-
-    /* Validate effective deadzone */
-    if (data->effective_deadzone < 0) {
-        LOG_ERR("effective deadzone must be non-negative");
-        return -EINVAL;
-    }
-    if (data->effective_deadzone >= (cfg->x.center - cfg->x.min) ||
-        data->effective_deadzone >= (cfg->x.max - cfg->x.center)) {
-        LOG_ERR("effective deadzone exceeds X axis range");
-        return -EINVAL;
-    }
-    if (cfg->has_y &&
-        (data->effective_deadzone >= (cfg->y.center - cfg->y.min) ||
-         data->effective_deadzone >= (cfg->y.max - cfg->y.center))) {
-        LOG_ERR("effective deadzone exceeds Y axis range");
-        return -EINVAL;
     }
     if (cfg->read_turn_on_time < 0 || cfg->read_turn_on_time > MAX_TURN_ON_TIME_US) {
         LOG_ERR("read-turn-on-time %d out of range", cfg->read_turn_on_time);
@@ -590,6 +570,74 @@ static int analog_stick_init(const struct device *dev) {
         return err;
     }
 
+    /* Copy axis configs into mutable data (center may be overridden below) */
+    data->effective_x = cfg->x;
+    if (cfg->has_y) {
+        data->effective_y = cfg->y;
+    }
+
+#ifdef CONFIG_ZMK_ANALOG_STICK_AUTO_CENTER
+    {
+        int32_t sum_x = 0;
+        int32_t sum_y = 0;
+        for (int i = 0; i < CONFIG_ZMK_ANALOG_STICK_AUTO_CENTER_SAMPLES; i++) {
+            int ac_err = adc_read(cfg->x.adc.dev, &data->seq_x);
+            if (ac_err) {
+                LOG_ERR("Auto-center X read %d failed: %d", i, ac_err);
+                return ac_err;
+            }
+            sum_x += data->adc_buf[0];
+            if (cfg->has_y) {
+                if (cfg->inter_channel_settling_us <= 100) {
+                    k_busy_wait((uint32_t)cfg->inter_channel_settling_us);
+                } else {
+                    k_sleep(K_USEC((uint32_t)cfg->inter_channel_settling_us));
+                }
+                ac_err = adc_read(cfg->y.adc.dev, &data->seq_y);
+                if (ac_err) {
+                    LOG_ERR("Auto-center Y read %d failed: %d", i, ac_err);
+                    return ac_err;
+                }
+                sum_y += data->adc_buf[1];
+            }
+        }
+        data->effective_x.center = sum_x / CONFIG_ZMK_ANALOG_STICK_AUTO_CENTER_SAMPLES;
+        LOG_INF("Auto-center X: DT=%d measured=%d", cfg->x.center,
+                data->effective_x.center);
+        if (cfg->has_y) {
+            data->effective_y.center = sum_y / CONFIG_ZMK_ANALOG_STICK_AUTO_CENTER_SAMPLES;
+            LOG_INF("Auto-center Y: DT=%d measured=%d", cfg->y.center,
+                    data->effective_y.center);
+        }
+    }
+#endif
+
+    /* Determine effective deadzone (uses effective center from auto-center or DT) */
+    if (cfg->has_deadzone_percent) {
+        int32_t half_range = MIN(data->effective_x.center - data->effective_x.min,
+                                 data->effective_x.max - data->effective_x.center);
+        data->effective_deadzone = (half_range * cfg->deadzone_percent) / 100;
+    } else {
+        data->effective_deadzone = cfg->deadzone;
+    }
+
+    /* Validate effective deadzone */
+    if (data->effective_deadzone < 0) {
+        LOG_ERR("effective deadzone must be non-negative");
+        return -EINVAL;
+    }
+    if (data->effective_deadzone >= (data->effective_x.center - data->effective_x.min) ||
+        data->effective_deadzone >= (data->effective_x.max - data->effective_x.center)) {
+        LOG_ERR("effective deadzone exceeds X axis range");
+        return -EINVAL;
+    }
+    if (cfg->has_y &&
+        (data->effective_deadzone >= (data->effective_y.center - data->effective_y.min) ||
+         data->effective_deadzone >= (data->effective_y.max - data->effective_y.center))) {
+        LOG_ERR("effective deadzone exceeds Y axis range");
+        return -EINVAL;
+    }
+
     /* Filter setup */
     err = parse_filter_coeffs(data, cfg);
     if (err) {
@@ -608,11 +656,11 @@ static int analog_stick_init(const struct device *dev) {
         data->inv_full_scale = q16_div(Q16_ONE, data->full_scale_q16);
     }
 
-    /* Pre-compute reciprocals */
-    compute_axis_reciprocals(&cfg->x, data->effective_deadzone,
+    /* Pre-compute reciprocals (uses effective axis configs) */
+    compute_axis_reciprocals(&data->effective_x, data->effective_deadzone,
                              &data->inv_range_neg_x, &data->inv_range_pos_x);
     if (cfg->has_y) {
-        compute_axis_reciprocals(&cfg->y, data->effective_deadzone,
+        compute_axis_reciprocals(&data->effective_y, data->effective_deadzone,
                                  &data->inv_range_neg_y, &data->inv_range_pos_y);
     }
 
