@@ -375,18 +375,15 @@ void analog_stick_process_and_emit(const struct device *dev) {
     int16_t out_x = (int16_t)(((int32_t)scaled_x * 127) >> Q16_SHIFT);
     int16_t out_y = (int16_t)(((int32_t)scaled_y * 127) >> Q16_SHIFT);
 
-    /* --- Emit input events on change --- */
+    /* --- Emit input events on change OR while deflected --- */
     bool x_changed = (out_x != data->prev_x);
     bool y_changed = (out_y != data->prev_y);
+    bool deflected = (out_x != 0 || out_y != 0);
 
-    if (x_changed || y_changed) {
+    if (x_changed || y_changed || deflected) {
         if (cfg->has_y) {
-            if (x_changed) {
-                input_report_abs(dev, INPUT_ABS_X, out_x, !y_changed, K_NO_WAIT);
-            }
-            if (y_changed) {
-                input_report_abs(dev, INPUT_ABS_Y, out_y, true, K_NO_WAIT);
-            }
+            input_report_abs(dev, INPUT_ABS_X, out_x, false, K_NO_WAIT);
+            input_report_abs(dev, INPUT_ABS_Y, out_y, true, K_NO_WAIT);
         } else {
             input_report_abs(dev, INPUT_ABS_X, out_x, true, K_NO_WAIT);
         }
