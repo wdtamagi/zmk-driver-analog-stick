@@ -267,6 +267,21 @@ static q16_t rescale_axis(q16_t adc_val, const struct axis_config *ax,
 }
 
 /* -------------------------------------------------------------------------- */
+/* ADC result sanitization                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Sign-extend a raw ADC buffer value from its native resolution to int32_t,
+ * then clamp negative values to 0.  The nRF SAADC is inherently signed; in
+ * single-ended mode a near-GND input can produce small negative results that
+ * land in the int32_t buffer without sign extension (e.g. -1 → 0x0000FFFF).
+ */
+static inline int32_t adc_sanitize(int32_t raw, uint8_t resolution) {
+    int32_t shift = 32 - resolution;
+    int32_t sign_extended = (raw << shift) >> shift; /* arithmetic right shift */
+    return (sign_extended < 0) ? 0 : sign_extended;
+}
+
 /* Rail detection                                                             */
 /* -------------------------------------------------------------------------- */
 
@@ -279,10 +294,7 @@ static bool adc_at_rail(int32_t value, uint8_t resolution, uint8_t oversampling)
     int32_t norm = (oversampling > 0) ? (value >> oversampling) : value;
     int32_t full_scale = (int32_t)((1U << resolution) - 1);
     int32_t margin = ADC_RAIL_MARGIN;
-    bool at_high = norm > (full_scale - margin);
-    bool at_low = (norm >= 0) ? (norm < margin)
-                              : (norm < (-(int32_t)(1U << resolution) + margin));
-    return at_high || at_low;
+    return norm > (full_scale - margin);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -304,7 +316,7 @@ int analog_stick_read_adc(const struct device *dev) {
         return err;
     }
 
-    int32_t adc_x = data->adc_buf[0];
+    int32_t adc_x = adc_sanitize(data->adc_buf[0], cfg->x.adc.resolution);
     if (adc_at_rail(adc_x, cfg->x.adc.resolution, cfg->x.adc.oversampling)) {
         LOG_DBG("[%s] X-axis at rail (%d)", dev->name, adc_x);
         adc_x = data->effective_x.center;
@@ -324,7 +336,7 @@ int analog_stick_read_adc(const struct device *dev) {
             data->read_err = err;
             return err;
         }
-        int32_t adc_y = data->adc_buf[1];
+        int32_t adc_y = adc_sanitize(data->adc_buf[1], cfg->y.adc.resolution);
         if (adc_at_rail(adc_y, cfg->y.adc.resolution, cfg->y.adc.oversampling)) {
             LOG_DBG("[%s] Y-axis at rail (%d)", dev->name, adc_y);
             adc_y = data->effective_y.center;
@@ -590,7 +602,7 @@ static int analog_stick_init(const struct device *dev) {
                 LOG_ERR("[%s] Auto-center X read %d failed: %d", dev->name, i, ac_err);
                 return ac_err;
             }
-            sum_x += data->adc_buf[0];
+            sum_x += adc_sanitize(data->adc_buf[0], cfg->x.adc.resolution);
             if (cfg->has_y) {
                 if (cfg->inter_channel_settling_us <= 100) {
                     k_busy_wait((uint32_t)cfg->inter_channel_settling_us);
@@ -602,7 +614,7 @@ static int analog_stick_init(const struct device *dev) {
                     LOG_ERR("[%s] Auto-center Y read %d failed: %d", dev->name, i, ac_err);
                     return ac_err;
                 }
-                sum_y += data->adc_buf[1];
+                sum_y += adc_sanitize(data->adc_buf[1], cfg->y.adc.resolution);
             }
         }
         data->effective_x.center = sum_x / CONFIG_ZMK_ANALOG_STICK_AUTO_CENTER_SAMPLES;
