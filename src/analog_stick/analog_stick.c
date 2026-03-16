@@ -271,21 +271,19 @@ static q16_t rescale_axis(q16_t adc_val, const struct axis_config *ax,
 /* -------------------------------------------------------------------------- */
 
 /**
- * Extract the low N bits of a raw ADC buffer value and clamp negative readings
- * to 0.  The nRF SAADC is inherently signed; in single-ended mode a near-GND
- * input can produce small negative results that land in the int32_t buffer
- * without sign extension (e.g. -1 → 0x0000FFFF).  We detect the ADC sign bit
- * and clamp to 0 — no shift-based sign extension needed, avoiding UB in C99.
+ * Clamp negative SAADC readings to 0.  The nRF SAADC always writes a 16-bit
+ * signed result regardless of configured resolution.  In single-ended mode a
+ * near-GND input can produce small negative results that land in the int32_t
+ * buffer without sign extension (e.g. -1 stored as 0x0000FFFF = 65535).
+ * We mask to 16 bits (upper bits may be uninitialized since DMA writes only 2
+ * bytes into the 4-byte int32_t slot) and check the SAADC sign bit directly.
  */
-static inline int32_t adc_sanitize(int32_t raw, uint8_t resolution) {
-    if (resolution == 0 || resolution > 16) {
+static inline int32_t adc_sanitize(int32_t raw) {
+    int32_t low16 = raw & 0xFFFF;
+    if (low16 >= 0x8000) {  /* SAADC sign bit set → negative reading */
         return 0;
     }
-    int32_t value = raw & ((1 << resolution) - 1); /* extract low N bits */
-    if (value & (1 << (resolution - 1))) {          /* ADC sign bit set → negative */
-        return 0;
-    }
-    return value;
+    return low16;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -307,7 +305,7 @@ int analog_stick_read_adc(const struct device *dev) {
         return err;
     }
 
-    int32_t adc_x = adc_sanitize(data->adc_buf[0], cfg->x.adc.resolution);
+    int32_t adc_x = adc_sanitize(data->adc_buf[0]);
     LOG_DBG("[%s] raw X=%d", dev->name, adc_x);
     data->raw_x = q16_from_int(adc_x);
 
@@ -323,7 +321,7 @@ int analog_stick_read_adc(const struct device *dev) {
             data->read_err = err;
             return err;
         }
-        int32_t adc_y = adc_sanitize(data->adc_buf[1], cfg->y.adc.resolution);
+        int32_t adc_y = adc_sanitize(data->adc_buf[1]);
         LOG_DBG("[%s] raw Y=%d", dev->name, adc_y);
         data->raw_y = q16_from_int(adc_y);
     }
@@ -585,7 +583,7 @@ static int analog_stick_init(const struct device *dev) {
                 LOG_ERR("[%s] Auto-center X read %d failed: %d", dev->name, i, ac_err);
                 return ac_err;
             }
-            sum_x += adc_sanitize(data->adc_buf[0], cfg->x.adc.resolution);
+            sum_x += adc_sanitize(data->adc_buf[0]);
             if (cfg->has_y) {
                 if (cfg->inter_channel_settling_us <= 100) {
                     k_busy_wait((uint32_t)cfg->inter_channel_settling_us);
@@ -597,7 +595,7 @@ static int analog_stick_init(const struct device *dev) {
                     LOG_ERR("[%s] Auto-center Y read %d failed: %d", dev->name, i, ac_err);
                     return ac_err;
                 }
-                sum_y += adc_sanitize(data->adc_buf[1], cfg->y.adc.resolution);
+                sum_y += adc_sanitize(data->adc_buf[1]);
             }
         }
         data->effective_x.center = sum_x / CONFIG_ZMK_ANALOG_STICK_AUTO_CENTER_SAMPLES;
